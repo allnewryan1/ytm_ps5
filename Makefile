@@ -25,7 +25,7 @@ endif
 
 ELF := ytmusic.elf
 
-SRCS := src/main.c src/text.c src/net.c src/player.c
+SRCS := src/main.c src/text.c src/net.c src/player.c src/latebind.c
 
 CFLAGS += -std=c11 -Wall -Wextra -Wno-unused-parameter -O2 -g \
 	-I$(HB_INC) -I$(HB_INC)/SDL2 -D_REENTRANT
@@ -64,7 +64,7 @@ NATIVE_OBJS := $(patsubst src/%.c,$(NATIVE_DIR)/%.o,$(SRCS))
 NATIVE_CRT := $(NATIVE_DIR)/app_crt.o
 NATIVE_PIE := $(NATIVE_DIR)/llvm-pie.elf
 NATIVE_ELF := $(NATIVE_DIR)/eboot.elf
-NATIVE_LIBS := $(filter-out -pthread -lkernel_sys,$(LIBS)) -lkernel -lSceLibcInternal
+NATIVE_LIBS := $(filter-out -pthread -lkernel_sys -lSceKeyboard -lSceImeDialog,$(LIBS)) -lkernel -lSceLibcInternal
 NATIVE_STUBS := $(filter-out %/libkernel_sys.so %/libkernel_web.so %/libkernel_stub_weak.so,$(wildcard $(PS5_PAYLOAD_SDK)/target/lib/*.so))
 NATIVE_LIBC := $(NATIVE_DIR)/libc-nodl.a
 NATIVE_COMPAT := $(NATIVE_DIR)/payload_compat.o
