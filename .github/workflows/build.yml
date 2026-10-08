@@ -103,7 +103,9 @@ jobs:
               test "$magic" = 4f153d1d
               prx=$(od -An -t x1 -N 4 dist/PPSA99105/sce_module/libc.prx | tr -d "[:space:]")
               test "$prx" = 5414f5ee
-              python3 -c "import sys; b=open('build/native/eboot.elf','rb').read(18); t=int.from_bytes(b[16:18],'little'); print('native eboot type', hex(t)); sys.exit(t!=0xfe10)"
+              etype=$(od -An -t x1 -j 16 -N 2 build/native/eboot.elf | tr -d "[:space:]")
+              test "$etype" = 10fe
+              echo "native eboot type 0xfe10"
               echo "validated $f"
             '
 
