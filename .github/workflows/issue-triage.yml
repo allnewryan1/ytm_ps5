@@ -1,0 +1,55 @@
+name: Issue Triage & Auto-Labeler
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-Label Issue by Title & Content
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = context.payload.issue.title.toLowerCase();
+            const body = (context.payload.issue.body || '').toLowerCase();
+            const labelsToAdd = new Set();
+
+            if (title.includes('[bug]') || title.includes('bug:') || title.includes('crash') || title.includes('error')) {
+              labelsToAdd.add('bug');
+            }
+            if (title.includes('[feature]') || title.includes('feat:') || title.includes('[enhancement]')) {
+              labelsToAdd.add('enhancement');
+            }
+            if (title.includes('[docs]') || title.includes('doc:') || title.includes('readme')) {
+              labelsToAdd.add('documentation');
+            }
+            if (title.includes('audio') || title.includes('sound') || title.includes('ffmpeg') || body.includes('audio')) {
+              labelsToAdd.add('audio');
+            }
+            if (title.includes('http') || title.includes('search') || title.includes('innertube') || title.includes('network')) {
+              labelsToAdd.add('network');
+            }
+            if (title.includes('ui') || title.includes('menu') || title.includes('keyboard') || title.includes('focus')) {
+              labelsToAdd.add('ui');
+            }
+            if (title.includes('playback') || title.includes('decode') || title.includes('stream')) {
+              labelsToAdd.add('playback');
+            }
+            if (title.includes('library') || title.includes('liked')) {
+              labelsToAdd.add('library');
+            }
+
+            if (labelsToAdd.size > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                labels: Array.from(labelsToAdd)
+              });
+            }

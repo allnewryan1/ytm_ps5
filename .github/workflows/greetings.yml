@@ -1,0 +1,29 @@
+name: Welcome New Contributors
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  greeting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/first-interaction@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: |
+            Thanks for opening your first issue on YouTube Music for PS5.
+
+            - Include the console firmware, the loader you use (port 9021), and the on-screen status line.
+            - This project does not include a jailbreak.
+          pr-message: |
+            Thanks for the pull request.
+
+            - The build workflow compiles `ytmusic.elf` in the pinned SDK image and checks that it is a PS5 ELF, not a host binary.
+            - CI has no console, so hardware checks stay on your side.

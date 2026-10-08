@@ -1,0 +1,111 @@
+# YouTube Music PS5 CI
+#
+# Same idea as EVO Player's build.yml: the runner uses this repo's Dockerfile
+# with the same pinned LLVM 18 / Payload SDK v0.42 / pacbrew v0.39, then
+# proves the payload still links. A GitHub runner has no PS5, so nothing here
+# sends an ELF to a console.
+name: build
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**/*.md"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch:
+
+env:
+  LLVM_VERSION: "18"
+  PS5_SDK_VERSION: "v0.42"
+  PACBREW_VERSION: "v0.39"
+
+jobs:
+  build-image:
+    name: Build dev image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image with layer cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ytm-ps5/dev:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            LLVM_VERSION=${{ env.LLVM_VERSION }}
+            PS5_SDK_VERSION=${{ env.PS5_SDK_VERSION }}
+            PACBREW_VERSION=${{ env.PACBREW_VERSION }}
+
+      - name: Export image
+        run: docker save ytm-ps5/dev:ci | gzip -1 > /tmp/ytm-image.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/ytm-image.tar.gz
+          retention-days: 1
+
+  build-payload:
+    name: Build ytmusic.elf
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+      - run: docker load < /tmp/ytm-image.tar.gz
+
+      - name: make
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            ytm-ps5/dev:ci bash -lc 'make && make package'
+
+      - name: Validate ELF
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            ytm-ps5/dev:ci bash -lc '
+              set -e
+              f=ytmusic.elf
+              file "$f" | grep -q "ELF 64-bit LSB.*x86-64" \
+                || { echo "not an x86-64 ELF"; exit 1; }
+              llvm-readelf -l "$f" | grep -q "/lib64/ld-linux" \
+                && { echo "links the HOST loader - built with the wrong compiler"; exit 1; }
+              llvm-readelf -h "$f" | grep -qE "Type:.*(DYN|EXEC)" \
+                || { echo "unexpected ELF type"; exit 1; }
+              test -f dist/YouTubeMusic/eboot.elf
+              test -f dist/YouTubeMusic/homebrew.js
+              echo "validated $f"
+            '
+
+      - name: Archive payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytmusic-elf
+          path: |
+            ytmusic.elf
+            dist/YouTubeMusic/
+          if-no-files-found: error
+          retention-days: 30
+
+  lint:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck -e SC1091 -S warning scripts/*.sh
