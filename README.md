@@ -1,8 +1,42 @@
 # YouTube Music for PS5
 
-Unofficial YouTube Music client
+Native userland payload for a jailbroken PS5 on system software 13.60. It is a DualSense client for searching, browsing shelves, playing songs, seeking, and keeping a library on the console. It is not a website, and it does not include a jailbreak.
+
+The build uses the [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk): `prospero.mk`, an ELF, and `PS5_DEPLOY` to an ELF loader on port **9021**. Video is SDL2 on sceVideoOut. Audio is FFmpeg into sceAudioOut. HTTPS calls to YouTube use sceHttp2, the same calls as the SDK `http2_get` sample.
 
 This is a fan client. It is not affiliated with Google, YouTube, or Sony.
+
+## GitHub Actions
+
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds this repository's Docker image (Ubuntu 24.04, clang 18, Payload SDK **v0.42**, pacbrew **v0.39**), runs `make` and `make package`, and rejects the ELF if it linked the host loader. When that workflow succeeds on `main`, [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the tested ELF and homebrew folder as `v<VERSION>-<commit>`.
+
+Other workflows label issues and pull requests, greet first-time contributors, and close stale issues and pull requests. Adding issues to a GitHub Project stays off until `ROADMAP_PROJECT_URL` and `ADD_TO_PROJECT_PAT` are set.
+
+## What you need
+
+- A PS5 on 13.60 that already has an ELF loader listening on port 9021. This repository does not include an exploit.
+- The PS5 Payload SDK, usually installed at `/opt/ps5-payload-sdk`.
+- pacbrew **SDL2** and **FFmpeg 7**, installed into that SDK's `target/user/homebrew` tree.
+
+## Build and send
+
+```bash
+export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+export PS5_HOST=192.168.1.50
+export PS5_PORT=9021
+make
+make test
+```
+
+`make test` runs the SDK's `PS5_DEPLOY` against the loader.
+
+To install the homebrew folder, copy it to the console with the FTP server you already run:
+
+```bash
+make package
+```
+
+That writes `dist/PPSA99105/` (`eboot.elf`, `homebrew.js`, and `sce_sys/param.json`). Put that directory in `/data/homebrew/` if your setup launches folders. The folder name and title are `PPSA99105`. This project does not install as a PKG.
 
 ## Controls
 

@@ -55,7 +55,7 @@ jobs:
         run: |
           set -eu
           ELF="$(find artifact -type f -name ytmusic.elf | head -1)"
-          HB="$(find artifact -type d -name YouTubeMusic | head -1)"
+          HB="$(find artifact -type d -name PPSA99105 | head -1)"
           test -n "$ELF"
           test -n "$HB"
           test -s "$ELF"
@@ -64,7 +64,7 @@ jobs:
           mkdir -p dist/release
           T="${{ steps.ver.outputs.tag }}"
           cp "$ELF" "dist/release/ytmusic-${T}.elf"
-          python3 - "$HB" "dist/release/YouTubeMusic-${T}-homebrew.zip" <<'PY'
+          python3 - "$HB" "dist/release/PPSA99105.zip" <<'PY'
           import sys, zipfile
           from pathlib import Path
           src = Path(sys.argv[1])
@@ -97,7 +97,7 @@ jobs:
           Two files from the same tested build:
 
           * \`ytmusic-*.elf\` — send to the ELF loader already listening on port 9021.
-          * \`YouTubeMusic-*-homebrew.zip\` — unzip and copy the folder to \`/data/homebrew/\` if your setup launches folders.
+          * \`PPSA99105.zip\` — unzip and copy the \`PPSA99105\` folder to \`/data/homebrew/\` if your setup launches folders.
 
           This repository does not include a jailbreak. The console has to be on firmware 13.60 and already running a loader.
 
@@ -117,5 +117,5 @@ jobs:
           make_latest: true
           files: |
             dist/release/ytmusic-*.elf
-            dist/release/YouTubeMusic-*-homebrew.zip
+            dist/release/PPSA99105.zip
             dist/release/SHA256SUMS.txt

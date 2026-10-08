@@ -85,8 +85,8 @@ jobs:
                 && { echo "links the HOST loader - built with the wrong compiler"; exit 1; }
               llvm-readelf -h "$f" | grep -qE "Type:.*(DYN|EXEC)" \
                 || { echo "unexpected ELF type"; exit 1; }
-              test -f dist/YouTubeMusic/eboot.elf
-              test -f dist/YouTubeMusic/homebrew.js
+              test -f dist/PPSA99105/eboot.elf
+              test -f dist/PPSA99105/homebrew.js
               echo "validated $f"
             '
 
@@ -96,7 +96,7 @@ jobs:
           name: ytmusic-elf
           path: |
             ytmusic.elf
-            dist/YouTubeMusic/
+            dist/PPSA99105/
           if-no-files-found: error
           retention-days: 30
 
