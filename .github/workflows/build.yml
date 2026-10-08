@@ -92,11 +92,17 @@ jobs:
                 && { echo "links the HOST loader - built with the wrong compiler"; exit 1; }
               llvm-readelf -h "$f" | grep -qE "Type:.*(DYN|EXEC)" \
                 || { echo "unexpected ELF type"; exit 1; }
-              test -f dist/PPSA99105/eboot.elf
+              test -f dist/PPSA99105/eboot.bin
+              test ! -e dist/PPSA99105/eboot.elf
+              test -f dist/PPSA99105/sce_module/libc.prx
               test -f dist/PPSA99105/homebrew.js
               test -f dist/PPSA99105/sce_sys/icon0.png
               test -f dist/PPSA99105/sce_sys/pic0.dds
               test -f dist/PPSA99105/sce_sys/pic1.dds
+              magic=$(od -An -t x1 -N 4 dist/PPSA99105/eboot.bin | tr -d "[:space:]")
+              test "$magic" = 4f153d1d
+              prx=$(od -An -t x1 -N 4 dist/PPSA99105/sce_module/libc.prx | tr -d "[:space:]")
+              test "$prx" = 5414f5ee
               echo "validated $f"
             '
 
