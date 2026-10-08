@@ -64,8 +64,10 @@ NATIVE_OBJS := $(patsubst src/%.c,$(NATIVE_DIR)/%.o,$(SRCS))
 NATIVE_CRT := $(NATIVE_DIR)/app_crt.o
 NATIVE_PIE := $(NATIVE_DIR)/llvm-pie.elf
 NATIVE_ELF := $(NATIVE_DIR)/eboot.elf
-NATIVE_LIBS := $(filter-out -pthread,$(LIBS)) -lSceLibcInternal -lc
+NATIVE_LIBS := $(filter-out -pthread,$(LIBS)) -lSceLibcInternal
 NATIVE_STUBS := $(wildcard $(PS5_PAYLOAD_SDK)/target/lib/*.so)
+NATIVE_LIBC := $(NATIVE_DIR)/libc-nodl.a
+NATIVE_COMPAT := $(NATIVE_DIR)/payload_compat.o
 
 .PHONY: all clean test package
 
@@ -83,15 +85,29 @@ $(NATIVE_CRT): third_party/ps5-native/app_crt.cpp
 	$(CXX) -std=c++20 -O2 -fno-exceptions -fno-rtti -fPIC \
 		-ffunction-sections -fdata-sections -c -o $@ $<
 
-$(NATIVE_PIE): $(NATIVE_CRT) $(NATIVE_OBJS) \
+$(NATIVE_COMPAT): third_party/ps5-native/payload_compat.c
+	mkdir -p $(dir $@)
+	$(CC) -O2 -fPIC -ffunction-sections -fdata-sections -c -o $@ $<
+
+# Drop payload libc objects that shadow libkernel and leave weak imports
+# (__dlopen, kernel_mprotect) the PS5 module converter cannot bind.
+$(NATIVE_LIBC): $(PS5_PAYLOAD_SDK)/target/lib/libc.a
+	mkdir -p $(dir $@)
+	cp $< $@
+	for obj in dlfcn.o mman.o; do \
+		if $(AR) t $@ | grep -qx "$$obj"; then $(AR) d $@ "$$obj"; fi; \
+	done
+
+$(NATIVE_PIE): $(NATIVE_CRT) $(NATIVE_OBJS) $(NATIVE_COMPAT) $(NATIVE_LIBC) \
 		third_party/ps5-native/ps5-pie.ld \
 		third_party/ps5-native/app-symbols.map
 	$(LD) -T third_party/ps5-native/ps5-pie.ld \
 		--version-script third_party/ps5-native/app-symbols.map \
 		-e _start -o $@ \
-		$(NATIVE_CRT) $(NATIVE_OBJS) \
+		$(NATIVE_CRT) $(NATIVE_OBJS) $(NATIVE_COMPAT) \
 		-L$(PS5_PAYLOAD_SDK)/target/lib -L$(HB_LIB) \
 		$(NATIVE_LIBS) \
+		$(NATIVE_LIBC) \
 		--as-needed $(NATIVE_STUBS)
 
 $(NATIVE_ELF): $(NATIVE_PIE) scripts/build-self-tool.sh

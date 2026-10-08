@@ -713,6 +713,7 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
         require(provider != stubs.end(), "public SDK stub directory lacks needed module " + needed);
         module_order.push_back(&*provider);
     }
+    std::string missing;
     for (std::size_t i = 1; i < image.dynamic_symbols.size(); ++i)
     {
         const elf::Symbol &symbol = image.dynamic_symbols[i];
@@ -727,9 +728,16 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
                 break;
             }
         }
-        require(provider != nullptr, "no public SDK stub exports required symbol " + symbol.name);
+        if (provider == nullptr)
+        {
+            if (!missing.empty())
+                missing += ", ";
+            missing += symbol.name;
+            continue;
+        }
         imports.push_back({symbol.name, provider, 0, 0, static_cast<std::uint32_t>(i), {}});
     }
+    require(missing.empty(), "no public SDK stub exports required symbol " + missing);
 
     std::vector<ModuleRecord> modules;
     std::vector<LibraryRecord> libraries;
