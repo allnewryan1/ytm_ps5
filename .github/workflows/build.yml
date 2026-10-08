@@ -70,9 +70,10 @@ jobs:
 
       - name: Encode launcher backgrounds
         run: |
+          sh scripts/decode-assets.sh
           python3 -m pip install --user pillow numpy
-          python3 scripts/encode-bc7.py sce_sys/background-source.png sce_sys/pic0.dds
-          python3 scripts/encode-bc7.py sce_sys/launch-background-source.png sce_sys/pic1.dds
+          python3 scripts/encode-bc7.py sce_sys/background-source.jpg sce_sys/pic0.dds
+          python3 scripts/encode-bc7.py sce_sys/launch-background-source.jpg sce_sys/pic1.dds
 
       - name: make
         run: |
