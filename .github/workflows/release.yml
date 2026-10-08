@@ -101,7 +101,7 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           target_commitish: ${{ steps.ver.outputs.sha }}
-          name: YouTube Music ${{ steps.ver.outputs.tag }}
+          name: v${{ steps.ver.outputs.version }}
           body_path: dist/release/NOTES.md
           draft: false
           prerelease: false
