@@ -28,12 +28,12 @@ jobs:
        github.event.workflow_run.event == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Download the tested payload
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ytmusic-elf
           path: artifact
@@ -97,7 +97,7 @@ jobs:
           Published because the [build workflow](${{ github.event.workflow_run.html_url }}) passed on \`${{ steps.ver.outputs.sha }}\`. That run linked the payload with clang 18, PS5 Payload SDK v0.42, and pacbrew v0.39, and rejected the ELF if it used the host loader. CI has no console, so this build is not hardware-tested. Checksums are in \`SHA256SUMS.txt\`.
           EOF
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           target_commitish: ${{ steps.ver.outputs.sha }}
