@@ -55,7 +55,7 @@ LIBS := $(SDL_LIBS) $(FF_LIBS) \
 	-lkernel_sys -lSceSystemService -lSceUserService \
 	-lScePad -lSceVideoOut -lSceAudioOut \
 	-lSceNet -lSceSsl -lSceHttp2 \
-	-lSceKeyboard -pthread
+	-lSceKeyboard -lSceImeDialog -pthread
 
 .PHONY: all clean test package
 
