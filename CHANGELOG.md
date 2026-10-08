@@ -4,4 +4,4 @@
 
 - First payload: YouTube Music search, shelves, playback, and a library file on the console.
 - SDL2 picture, FFmpeg audio, sceHttp2 for Innertube.
-- Homebrew folder package (`eboot.elf`, `homebrew.js`, `sce_sys/param.json`).
+- ShadowMountPlus folder: `eboot.bin`, `sce_module/libc.prx`, and `sce_sys/`.
