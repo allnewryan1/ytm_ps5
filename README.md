@@ -36,7 +36,13 @@ To install the homebrew folder, copy it to the console with the FTP server you a
 make package
 ```
 
-That writes `dist/PPSA99105/` (`eboot.elf`, `homebrew.js`, and `sce_sys/` with `param.json`, `icon0.png`, `pic0.dds`, and `pic1.dds`). Put that directory in `/data/homebrew/` if your setup launches folders. The folder name and title are `PPSA99105`. This project does not install as a PKG.
+That writes `dist/PPSA99105/`. ShadowMountPlus installs that folder, not a PKG. Copy the folder (not the zip) to `/data/homebrew/` so the console sees:
+
+- `/data/homebrew/PPSA99105/eboot.bin`
+- `/data/homebrew/PPSA99105/sce_module/libc.prx`
+- `/data/homebrew/PPSA99105/sce_sys/` (`param.json`, `icon0.png`, `pic0.dds`, `pic1.dds`)
+
+The folder name and title are `PPSA99105`. `libc.prx` is a clean-room runtime shim from [ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore) (GPL-3.0-or-later). It is not a Sony library. If the tile does not show up, set the folder and everything in it to mode `777` from your FTP client. The separate `ytmusic.elf` file is still what an ELF loader on port 9021 runs.
 
 ## Controls
 
