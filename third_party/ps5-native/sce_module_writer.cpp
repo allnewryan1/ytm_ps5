@@ -719,13 +719,24 @@ Bytes write_executable(const Image &image, std::span<const Stub> stubs, const Op
         const elf::Symbol &symbol = image.dynamic_symbols[i];
         require(symbol.undefined(), "native converter does not yet publish application exports");
         const Stub *provider = nullptr;
+        int provider_rank = 100;
         for (const Stub *candidate : module_order)
         {
-            if (std::find(candidate->exports.begin(), candidate->exports.end(), symbol.name) !=
+            if (std::find(candidate->exports.begin(), candidate->exports.end(), symbol.name) ==
                 candidate->exports.end())
+                continue;
+            // A BigApp loads libkernel.sprx, not libkernel_sys.sprx. Prefer the
+            // library the process actually maps when both stubs export a symbol.
+            int rank = 1;
+            if (candidate->module_name == "libkernel")
+                rank = 0;
+            else if (candidate->module_name == "libkernel_web" ||
+                     candidate->module_name == "libkernel_sys")
+                rank = 2;
+            if (provider == nullptr || rank < provider_rank)
             {
                 provider = candidate;
-                break;
+                provider_rank = rank;
             }
         }
         if (provider == nullptr)
