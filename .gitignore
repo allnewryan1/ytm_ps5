@@ -1,3 +1,5 @@
 ytmusic.elf
 dist/
+build/
 *.o
+sce_module/*.prx
