@@ -1,8 +1,11 @@
 Host tools that package the ShadowMountPlus folder.
 
-`ps5-native-tool self --sign` wraps `ytmusic.elf` as `eboot.bin` (development
-FSELF magic `0x1D3D154F`). `libc-builder` reproduces `sce_module/libc.prx`
-from `runtime/api-surface.txt` and `runtime/imports.txt`.
+`ps5-native-tool link` turns the address-0 PIE into a PS5 module
+(`e_type` `0xFE10`). `self --sign` then wraps that module as `eboot.bin`
+(development FSELF magic `0x1D3D154F`). `libc-builder` reproduces
+`sce_module/libc.prx` from `runtime/api-surface.txt` and
+`runtime/imports.txt`. `app_crt.cpp`, `ps5-pie.ld`, and `app-symbols.map`
+are the startup and link layout for that module.
 
 The sources are GPL-3.0-or-later, taken unchanged from
 [ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore)

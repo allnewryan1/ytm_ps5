@@ -20,11 +20,12 @@ tool=$(sh "$root/scripts/build-self-tool.sh")
 libc=$(sh "$root/scripts/build-libc.sh")
 test -x "$tool"
 test -s "$libc"
+test -f "$root/build/native/eboot.elf"
 
 app="$root/dist/PPSA99105"
 rm -rf "$app"
 mkdir -p "$app/sce_sys" "$app/sce_module"
-"$tool" self --sign --in "$root/ytmusic.elf" --out "$app/eboot.bin" --magic 0x1D3D154F
+"$tool" self --sign --in "$root/build/native/eboot.elf" --out "$app/eboot.bin" --magic 0x1D3D154F
 cp "$libc" "$app/sce_module/libc.prx"
 cp "$root/meta/homebrew.js" "$app/homebrew.js"
 cp "$root/meta/param.json" "$app/sce_sys/param.json"

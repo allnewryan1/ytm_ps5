@@ -42,7 +42,7 @@ That writes `dist/PPSA99105/`. ShadowMountPlus installs that folder, not a PKG. 
 - `/data/homebrew/PPSA99105/sce_module/libc.prx`
 - `/data/homebrew/PPSA99105/sce_sys/` (`param.json`, `icon0.png`, `pic0.dds`, `pic1.dds`)
 
-The folder name and title are `PPSA99105`. `libc.prx` is a clean-room runtime shim from [ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore) (GPL-3.0-or-later). It is not a Sony library. If the tile does not show up, set the folder and everything in it to mode `777` from your FTP client. The separate `ytmusic.elf` file is still what an ELF loader on port 9021 runs.
+The folder name and title are `PPSA99105`. `eboot.bin` is a native PS5 program (not the loader payload). `libc.prx` is a clean-room runtime shim from [ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore) (GPL-3.0-or-later). It is not a Sony library. If the tile does not show up, set the folder and everything in it to mode `777` from your FTP client. The separate `ytmusic.elf` file is still what an ELF loader on port 9021 runs.
 
 ## Controls
 
