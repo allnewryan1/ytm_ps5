@@ -1,0 +1,137 @@
+# YouTube Music PS5 release
+#
+# Same shape as EVO Player's release.yml: build in the pinned Docker image,
+# check the binary, publish a GitHub release. This project ships an ELF and a
+# homebrew folder, not an .ffpfsc image.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# A manual run builds and verifies but does not publish, unless it was started
+# by a tag push.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0). Manual runs do not publish."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${TAG}"
+
+      - name: Check VERSION matches the tag
+        run: |
+          FILE_VER="$(tr -d '[:space:]' < VERSION)"
+          WANT="${{ steps.ver.outputs.version }}"
+          if [ "$FILE_VER" != "$WANT" ]; then
+            echo "::error::VERSION is '$FILE_VER' but the tag says '$WANT'"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ytm-ps5/dev:release
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build payload and homebrew folder
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            ytm-ps5/dev:release bash -lc 'make && make package'
+
+      - name: Verify the ELF
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            ytm-ps5/dev:release bash -lc '
+              set -e
+              file ytmusic.elf | grep -q "ELF 64-bit LSB.*x86-64"
+              llvm-readelf -l ytmusic.elf | grep -q "/lib64/ld-linux" && exit 1
+              test -s dist/YouTubeMusic/eboot.elf
+              test -s dist/YouTubeMusic/homebrew.js
+              python3 - <<PY
+          import json
+          p = json.load(open("dist/YouTubeMusic/sce_sys/param.json"))
+          assert p["titleId"] == "YTMS00001", p.get("titleId")
+          print("param.json", p["titleId"])
+          PY
+            '
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/release
+          T="${{ steps.ver.outputs.tag }}"
+          cp ytmusic.elf "dist/release/ytmusic-${T}.elf"
+          tar -C dist -czf "dist/release/YouTubeMusic-${T}-homebrew.tar.gz" YouTubeMusic
+          ( cd dist/release && sha256sum * > SHA256SUMS.txt )
+          ls -la dist/release
+
+      - name: Release notes
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          if awk -v v="## ${V}" '
+                $0 == v {found=1; next}
+                found && /^## / {exit}
+                found {print}
+              ' CHANGELOG.md > dist/release/NOTES.md && [ -s dist/release/NOTES.md ]; then
+            echo "" >> dist/release/NOTES.md
+            echo "---" >> dist/release/NOTES.md
+            echo "" >> dist/release/NOTES.md
+          else
+            echo "::warning::no CHANGELOG section for ${V}"
+            : > dist/release/NOTES.md
+          fi
+          cat >> dist/release/NOTES.md <<'EOF'
+          ## Install
+
+          Two files, same build:
+
+          * `ytmusic-*.elf` — send to the ELF loader already listening on port 9021.
+          * `YouTubeMusic-*-homebrew.tar.gz` — unpack and copy the folder to `/data/homebrew/` if your setup launches folders.
+
+          This repository does not include a jailbreak. The console has to be on firmware 13.60 and already running a loader.
+
+          ## Verification
+
+          Built in CI from clang 18, PS5 Payload SDK v0.42, and pacbrew v0.39 (SDL2 + FFmpeg). CI has no console, so this build is not hardware-tested. Checksums are in `SHA256SUMS.txt`.
+          EOF
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: YouTube Music ${{ steps.ver.outputs.tag }}
+          body_path: dist/release/NOTES.md
+          draft: false
+          prerelease: false
+          make_latest: true
+          files: |
+            dist/release/ytmusic-*.elf
+            dist/release/YouTubeMusic-*-homebrew.tar.gz
+            dist/release/SHA256SUMS.txt
