@@ -59,7 +59,9 @@ jobs:
           test -n "$ELF"
           test -n "$HB"
           test -s "$ELF"
-          test -s "$HB/eboot.elf"
+          test -s "$HB/eboot.bin"
+          test ! -e "$HB/eboot.elf"
+          test -s "$HB/sce_module/libc.prx"
           test -s "$HB/homebrew.js"
           mkdir -p dist/release
           T="${{ steps.ver.outputs.tag }}"
@@ -97,7 +99,7 @@ jobs:
           Two files from the same tested build:
 
           * \`ytmusic-*.elf\` — send to the ELF loader already listening on port 9021.
-          * \`PPSA99105.zip\` — unzip and copy the \`PPSA99105\` folder to \`/data/homebrew/\` if your setup launches folders.
+          * \`PPSA99105.zip\` — unzip and copy the \`PPSA99105\` folder to \`/data/homebrew/\`. ShadowMountPlus wants \`eboot.bin\` at \`/data/homebrew/PPSA99105/eboot.bin\`, plus \`sce_module/libc.prx\` and \`sce_sys/\`. Do not put the zip itself in that folder.
 
           This repository does not include a jailbreak. The console has to be on firmware 13.60 and already running a loader.
 
