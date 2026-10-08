@@ -61,6 +61,7 @@ LIBS := $(SDL_LIBS) $(FF_LIBS) \
 # then convert it to a PS5 module (e_type 0xFE10) before signing.
 NATIVE_DIR := build/native
 NATIVE_OBJS := $(patsubst src/%.c,$(NATIVE_DIR)/%.o,$(SRCS))
+NATIVE_APP := $(NATIVE_DIR)/bigapp.o
 NATIVE_CRT := $(NATIVE_DIR)/app_crt.o
 NATIVE_PIE := $(NATIVE_DIR)/llvm-pie.elf
 NATIVE_ELF := $(NATIVE_DIR)/eboot.elf
@@ -98,13 +99,14 @@ $(NATIVE_LIBC): $(PS5_PAYLOAD_SDK)/target/lib/libc.a
 		if $(AR) t $@ | grep -qx "$$obj"; then $(AR) d $@ "$$obj"; fi; \
 	done
 
-$(NATIVE_PIE): $(NATIVE_CRT) $(NATIVE_OBJS) $(NATIVE_COMPAT) $(NATIVE_LIBC) \
+$(NATIVE_PIE): $(NATIVE_CRT) $(NATIVE_OBJS) $(NATIVE_APP) $(NATIVE_COMPAT) $(NATIVE_LIBC) \
 		third_party/ps5-native/ps5-pie.ld \
 		third_party/ps5-native/app-symbols.map
 	$(LD) -T third_party/ps5-native/ps5-pie.ld \
 		--version-script third_party/ps5-native/app-symbols.map \
+		--allow-multiple-definition \
 		-e _start -o $@ \
-		$(NATIVE_CRT) $(NATIVE_OBJS) $(NATIVE_COMPAT) \
+		$(NATIVE_CRT) $(NATIVE_OBJS) $(NATIVE_APP) $(NATIVE_COMPAT) \
 		-L$(PS5_PAYLOAD_SDK)/target/lib -L$(HB_LIB) \
 		$(NATIVE_LIBS) \
 		$(NATIVE_LIBC) \

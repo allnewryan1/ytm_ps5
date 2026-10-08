@@ -10,3 +10,4 @@
 - Kernel calls such as the startup notification go through `libkernel`, which a game process loads. `libkernel_sys` is not mapped, and those imports were null.
 - Home screen title is YouTube Music. The install folder is still `PPSA99105`.
 - Icon and background art are a record and a listening room, not the old play-button tile.
+- Scanout memory comes from the game direct-memory pool. Leaving the process no longer uses the exit syscall the shell reports as a crash.

@@ -70,12 +70,19 @@ typedef struct {
 } notify_request_t;
 
 int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
+int sceKernelUsleep(unsigned int micros);
 
 static void toast(const char *msg) {
   notify_request_t req;
   memset(&req, 0, sizeof req);
   snprintf(req.message, sizeof req.message, "%s", msg);
   sceKernelSendNotificationRequest(0, &req, sizeof req, 0);
+}
+
+static void park(const char *msg) {
+  printf("ytmusic: %s\n", msg ? msg : "stopped");
+  toast(msg && msg[0] ? msg : "YouTube Music stopped");
+  for (;;) sceKernelUsleep(1000000);
 }
 
 static void set_status(const char *s) { snprintf(g_status, sizeof g_status, "%s", s ? s : ""); }
@@ -753,25 +760,19 @@ int main(int argc, char **argv) {
   printf("ytmusic: starting on PS5 userland\n");
   toast("YouTube Music");
 
-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
-    printf("SDL_Init: %s\n", SDL_GetError());
-    toast(SDL_GetError());
-    return 1;
-  }
+  /* Audio or the pad must not take the picture down with them. */
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) park(SDL_GetError());
+  if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
+    printf("ytmusic: audio: %s\n", SDL_GetError());
+  if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
+    printf("ytmusic: pad: %s\n", SDL_GetError());
   g_win = SDL_CreateWindow("YouTube Music", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1920,
                            1080, SDL_WINDOW_FULLSCREEN_DESKTOP);
   if (!g_win) g_win = SDL_CreateWindow("YouTube Music", 0, 0, 1920, 1080, 0);
-  if (!g_win) {
-    printf("window: %s\n", SDL_GetError());
-    toast("Could not open the display");
-    return 1;
-  }
+  if (!g_win) park(SDL_GetError());
   g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
   if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
-  if (!g_ren) {
-    toast("Could not open the GPU");
-    return 1;
-  }
+  if (!g_ren) park(SDL_GetError());
   SDL_StartTextInput();
   if (player_open(err, (int)sizeof err) != 0) set_status(err);
   if (net_init(err, (int)sizeof err) != 0) set_status(err);
