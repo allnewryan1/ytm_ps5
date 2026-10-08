@@ -1,0 +1,27 @@
+ui:
+  - changed-files:
+      - any-glob-to-any-file: ["src/main.c", "src/text.c", "src/text.h", "src/font8x8_basic.h"]
+
+audio:
+  - changed-files:
+      - any-glob-to-any-file: ["src/player.c", "src/player.h"]
+
+network:
+  - changed-files:
+      - any-glob-to-any-file: ["src/net.c", "src/net.h"]
+
+playback:
+  - changed-files:
+      - any-glob-to-any-file: ["src/player.c", "src/main.c"]
+
+library:
+  - changed-files:
+      - any-glob-to-any-file: ["src/main.c"]
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ["*.md", "README.md", "CHANGELOG.md"]
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: [".github/**", "scripts/**", "Dockerfile", "Makefile"]
