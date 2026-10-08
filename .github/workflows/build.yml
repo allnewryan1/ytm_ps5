@@ -68,6 +68,12 @@ jobs:
           path: /tmp
       - run: docker load < /tmp/ytm-image.tar.gz
 
+      - name: Encode launcher backgrounds
+        run: |
+          python3 -m pip install --user pillow numpy
+          python3 scripts/encode-bc7.py sce_sys/background-source.png sce_sys/pic0.dds
+          python3 scripts/encode-bc7.py sce_sys/launch-background-source.png sce_sys/pic1.dds
+
       - name: make
         run: |
           docker run --rm -v "$PWD:/workspace" -w /workspace \
@@ -87,6 +93,9 @@ jobs:
                 || { echo "unexpected ELF type"; exit 1; }
               test -f dist/PPSA99105/eboot.elf
               test -f dist/PPSA99105/homebrew.js
+              test -f dist/PPSA99105/sce_sys/icon0.png
+              test -f dist/PPSA99105/sce_sys/pic0.dds
+              test -f dist/PPSA99105/sce_sys/pic1.dds
               echo "validated $f"
             '
 

@@ -36,7 +36,7 @@ To install the homebrew folder, copy it to the console with the FTP server you a
 make package
 ```
 
-That writes `dist/PPSA99105/` (`eboot.elf`, `homebrew.js`, and `sce_sys/param.json`). Put that directory in `/data/homebrew/` if your setup launches folders. The folder name and title are `PPSA99105`. This project does not install as a PKG.
+That writes `dist/PPSA99105/` (`eboot.elf`, `homebrew.js`, and `sce_sys/` with `param.json`, `icon0.png`, `pic0.dds`, and `pic1.dds`). Put that directory in `/data/homebrew/` if your setup launches folders. The folder name and title are `PPSA99105`. This project does not install as a PKG.
 
 ## Controls
 
