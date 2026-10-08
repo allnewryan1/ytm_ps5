@@ -8,7 +8,7 @@ Fan client. Not affiliated with Google, YouTube, or Sony.
 
 ## GitHub Actions
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) follows EVO Player's CI: it builds this repo's Docker image (Ubuntu 24.04, clang 18, Payload SDK **v0.42**, pacbrew **v0.39**), runs `make` and `make package`, and rejects the ELF if it linked the host loader. A tag `v*` runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and publishes the ELF plus the homebrew folder. The tag has to match [`VERSION`](VERSION).
+[`.github/workflows/build.yml`](.github/workflows/build.yml) follows EVO Player's CI: it builds this repo's Docker image (Ubuntu 24.04, clang 18, Payload SDK **v0.42**, pacbrew **v0.39**), runs `make` and `make package`, and rejects the ELF if it linked the host loader. When that workflow succeeds on `main`, [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the tested ELF and homebrew folder as `v<VERSION>-<commit>`.
 
 Issue triage, PR labels, a first-interaction greeting, and stale-issue closing are the same kind of workflows EVO uses. Adding issues to a GitHub Project stays off until `ROADMAP_PROJECT_URL` and `ADD_TO_PROJECT_PAT` are set.
 
