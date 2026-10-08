@@ -64,7 +64,16 @@ jobs:
           mkdir -p dist/release
           T="${{ steps.ver.outputs.tag }}"
           cp "$ELF" "dist/release/ytmusic-${T}.elf"
-          tar -C "$(dirname "$HB")" -czf "dist/release/YouTubeMusic-${T}-homebrew.tar.gz" "$(basename "$HB")"
+          python3 - "$HB" "dist/release/YouTubeMusic-${T}-homebrew.zip" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          src = Path(sys.argv[1])
+          out = Path(sys.argv[2])
+          with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              for path in sorted(src.rglob("*")):
+                  if path.is_file():
+                      z.write(path, Path(src.name) / path.relative_to(src))
+          PY
           ( cd dist/release && sha256sum -- * > SHA256SUMS.txt )
           ls -la dist/release
 
@@ -88,7 +97,7 @@ jobs:
           Two files from the same tested build:
 
           * \`ytmusic-*.elf\` — send to the ELF loader already listening on port 9021.
-          * \`YouTubeMusic-*-homebrew.tar.gz\` — unpack and copy the folder to \`/data/homebrew/\` if your setup launches folders.
+          * \`YouTubeMusic-*-homebrew.zip\` — unzip and copy the folder to \`/data/homebrew/\` if your setup launches folders.
 
           This repository does not include a jailbreak. The console has to be on firmware 13.60 and already running a loader.
 
@@ -108,5 +117,5 @@ jobs:
           make_latest: true
           files: |
             dist/release/ytmusic-*.elf
-            dist/release/YouTubeMusic-*-homebrew.tar.gz
+            dist/release/YouTubeMusic-*-homebrew.zip
             dist/release/SHA256SUMS.txt
