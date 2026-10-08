@@ -116,7 +116,7 @@ $(NATIVE_ELF): $(NATIVE_PIE) scripts/build-self-tool.sh
 		--stub-dir $(PS5_PAYLOAD_SDK)/target/lib \
 		--module-sdk 0x02000009 --companion-sdk 0x08050001 \
 		--heap-size 0xffffffffffffffff --file-name eboot.elf
-	python3 -c 'b=open("$(NATIVE_ELF)","rb").read(18); t=int.from_bytes(b[16:18],"little"); raise SystemExit("eboot type %s"%hex(t)) if t!=0xfe10 else None'
+	python3 -c 'import sys; b=open("$(NATIVE_ELF)","rb").read(18); t=int.from_bytes(b[16:18],"little"); print("native eboot type", hex(t)); sys.exit(t!=0xfe10)'
 
 clean:
 	rm -f $(ELF)
