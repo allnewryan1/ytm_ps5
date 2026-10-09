@@ -15,12 +15,12 @@
 #define BAR_Y 908
 #define HINT_Y 1016
 
-enum { NAV_HOME, NAV_SEARCH, NAV_LIBRARY, NAV_QUIT, NAV_COUNT };
+enum { NAV_HOME, NAV_SEARCH, NAV_LIBRARY, NAV_ACCOUNT, NAV_QUIT, NAV_COUNT };
 enum { ZONE_NAV, ZONE_BODY };
-enum { BODY_HOME, BODY_LIST, BODY_SEARCH, BODY_LIBRARY };
+enum { BODY_HOME, BODY_LIST, BODY_SEARCH, BODY_LIBRARY, BODY_ACCOUNT };
 enum { REP_OFF, REP_ALL, REP_ONE };
 
-static const char *nav_name[] = {"Home", "Explore", "Library", "Quit"};
+static const char *nav_name[] = {"Home", "Explore", "Library", "Account", "Quit"};
 static const char *krow[] = {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"};
 static const char *specials[] = {"space", "del", "clear", "search"};
 static const char *moods[][2] = {
@@ -51,6 +51,12 @@ static int g_keyr;
 static int g_keyc;
 static int g_player_ui;
 static int g_repeat = REP_OFF;
+static int g_acct_sel;
+static int g_auth_wait;
+static int g_auth_interval = 5;
+static Uint32 g_auth_next;
+static char g_user_code[24];
+static char g_verify_url[80];
 
 static Track g_results[YTM_TRACK_CAP];
 static int g_nresults;
@@ -209,6 +215,37 @@ static void library_toggle(const Track *t) {
   set_status("Saved to this console");
 }
 
+static void auth_save(void) {
+  const char *t = ytm_refresh_token();
+  FILE *f;
+  if (!t || !t[0]) return;
+  mkdir("/data", 0755);
+  mkdir("/data/ytmusic", 0755);
+  f = fopen("/data/ytmusic/auth.txt", "w");
+  if (!f) {
+    set_status("Could not save sign-in on this console");
+    return;
+  }
+  fprintf(f, "%s\n", t);
+  fclose(f);
+}
+
+static void auth_load(void) {
+  FILE *f = fopen("/data/ytmusic/auth.txt", "r");
+  char line[1100];
+  char err[192];
+  if (!f) return;
+  if (!fgets(line, sizeof line, f)) {
+    fclose(f);
+    return;
+  }
+  fclose(f);
+  line[strcspn(line, "\r\n")] = 0;
+  if (!line[0]) return;
+  ytm_set_refresh_token(line);
+  if (ytm_auth_refresh(err, (int)sizeof err) != 0) set_status(err);
+}
+
 static void paint(void);
 
 static void do_search(const char *q) {
@@ -294,6 +331,62 @@ static Track *focused(void) {
 
 static int key_cols(int row) { return row < 4 ? (int)strlen(krow[row]) : 4; }
 
+static void start_code(void) {
+  char err[192];
+  int interval = 5;
+  g_user_code[0] = 0;
+  g_verify_url[0] = 0;
+  if (ytm_auth_begin(g_user_code, (int)sizeof g_user_code, g_verify_url, (int)sizeof g_verify_url,
+                     &interval, err, (int)sizeof err) != 0) {
+    g_auth_wait = 0;
+    set_status(err);
+    toast(err);
+    return;
+  }
+  g_auth_interval = interval;
+  g_auth_next = SDL_GetTicks() + (Uint32)interval * 1000u;
+  g_auth_wait = 1;
+  set_status("Waiting for approval");
+}
+
+static void open_account(void) {
+  char err[192];
+  g_body = BODY_ACCOUNT;
+  g_zone = ZONE_BODY;
+  g_nav = NAV_ACCOUNT;
+  g_acct_sel = 0;
+  g_player_ui = 0;
+  if (!ytm_signed_in() && ytm_refresh_token()[0] && ytm_auth_refresh(err, (int)sizeof err) != 0)
+    set_status(err);
+  if (ytm_signed_in()) {
+    g_auth_wait = 0;
+    set_status("Signed in");
+    return;
+  }
+  start_code();
+}
+
+static void load_likes(void) {
+  char err[192];
+  int n;
+  set_status("Opening your likes...");
+  paint();
+  n = ytm_liked(g_results, YTM_TRACK_CAP, err, (int)sizeof err);
+  if (n <= 0) {
+    g_nresults = 0;
+    set_status(err[0] ? err : "No liked songs");
+    toast(g_status);
+    return;
+  }
+  g_nresults = n;
+  g_sel = 0;
+  g_scroll = 0;
+  snprintf(g_list_title, sizeof g_list_title, "%s", "Liked songs");
+  g_body = BODY_LIST;
+  g_zone = ZONE_BODY;
+  set_status("");
+}
+
 static void on_activate(void) {
   if (g_player_ui) {
     player_toggle();
@@ -306,12 +399,16 @@ static void on_activate(void) {
     }
     if (g_nav == NAV_HOME) g_body = BODY_HOME;
     else if (g_nav == NAV_SEARCH) g_body = BODY_SEARCH;
-    else {
+    else if (g_nav == NAV_LIBRARY) {
       library_load();
       g_body = BODY_LIBRARY;
       g_sel = 0;
       g_scroll = 0;
+    } else {
+      open_account();
+      return;
     }
+    g_auth_wait = 0;
     g_zone = ZONE_BODY;
     return;
   }
@@ -327,6 +424,21 @@ static void on_activate(void) {
   }
   else if (g_body == BODY_LIST) play_list(g_results, g_nresults, g_sel);
   else if (g_body == BODY_LIBRARY) play_list(g_likes, g_nlikes, g_sel);
+  else if (g_body == BODY_ACCOUNT) {
+    if (!ytm_signed_in()) {
+      start_code();
+      return;
+    }
+    if (g_acct_sel == 0) load_likes();
+    else {
+      ytm_auth_signout();
+      remove("/data/ytmusic/auth.txt");
+      g_auth_wait = 0;
+      set_status("Signed out");
+      toast("Signed out");
+      start_code();
+    }
+  }
   else if (g_body == BODY_SEARCH) {
     if (g_keyr < 4) {
       if ((int)strlen(g_query) + 1 < (int)sizeof g_query) {
@@ -356,6 +468,7 @@ static void on_back(void) {
     g_player_ui = 0;
     return;
   }
+  g_auth_wait = 0;
   if (g_body != BODY_HOME) {
     g_body = BODY_HOME;
     g_zone = ZONE_BODY;
@@ -437,6 +550,18 @@ static void on_move(int dx, int dy) {
     if (g_keyc >= key_cols(g_keyr)) g_keyc = key_cols(g_keyr) - 1;
     return;
   }
+  if (g_body == BODY_ACCOUNT) {
+    if (dx < 0) {
+      g_zone = ZONE_NAV;
+      return;
+    }
+    if (ytm_signed_in() && dy) {
+      g_acct_sel += dy;
+      if (g_acct_sel < 0) g_acct_sel = 0;
+      if (g_acct_sel > 1) g_acct_sel = 1;
+    }
+    return;
+  }
   g_sel += dy;
   keep_sel_visible(g_body == BODY_LIBRARY ? g_nlikes : g_nresults);
 }
@@ -480,6 +605,13 @@ static void draw_cover(Draw *d, int x, int y, int size, const char *label, int r
   draw_text(d, x + (size - tw) / 2, y + size / 2 - 18, 1, 255, 248, 236, letter);
 }
 
+static void stroke(Draw *d, int x, int y, int w, int h, int t, int r, int g, int b) {
+  fill_v(d, x, y, w, t, r, g, b);
+  fill_v(d, x, y + h - t, w, t, r, g, b);
+  fill_v(d, x, y, t, h, r, g, b);
+  fill_v(d, x + w - t, y, t, h, r, g, b);
+}
+
 static void present(Draw *d) {
   static int told;
   draw_end(d);
@@ -494,13 +626,17 @@ static void draw_hints(Draw *d) {
   fill_v(d, 0, HINT_Y, 1920, 1080 - HINT_Y, 10, 11, 14);
   fill_v(d, 0, HINT_Y, 1920, 2, 212, 166, 86);
   if (g_player_ui) {
-    s = "X Pause    O Back    D-pad Seek / Volume    L1 R1 Skip    Square Like    Create Repeat";
+    s = "X Pause   O Back   D-pad Seek / Volume   L1 R1 Skip   Square Like   Touchpad Repeat";
+  } else if (g_body == BODY_ACCOUNT) {
+    s = ytm_signed_in()
+            ? "X Open   O Back   D-pad Move   Options Search   Touchpad Repeat"
+            : "X New code   O Back   Options Search";
   } else if (g_body == BODY_SEARCH) {
-    s = "X Type    O Back    D-pad Move    Triangle Player    Square Like    Options Search";
+    s = "X Type   O Back   D-pad Move   Triangle Player   Touchpad Repeat";
   } else if (g_body == BODY_HOME) {
-    s = "X Play    O Menu    D-pad Move    Options Search    Square Like    Triangle Player    L1 R1 Skip";
+    s = "X Play   O Menu   D-pad Move   Options Search   Touchpad Repeat   Triangle Player";
   } else {
-    s = "X Play    O Home    D-pad Move    Square Like    Triangle Player    Options Search    L1 R1 Skip";
+    s = "X Play   O Home   D-pad Move   Square Like   Triangle Player   Options Search   Touchpad Repeat";
   }
   draw_text(d, 28, HINT_Y + 16, 1, 214, 216, 224, s);
 }
@@ -521,6 +657,9 @@ static void paint(void) {
     int w = 0;
     if (dur < 1) dur = now->seconds;
     fill_v(&d, 0, 0, 1920, 1080, 8, 9, 12);
+    stroke(&d, 16, 16, 1888, HINT_Y - 32, 6, 212, 166, 86);
+    fill_v(&d, 40, 34, 340, 42, 212, 166, 86);
+    draw_text(&d, 52, 40, 1, 24, 18, 8, "Controlling the player");
     draw_cover(&d, 780, 96, 360, now->title, 0);
     fit(line, (int)sizeof line, now->title, 2, 1500);
     draw_text(&d, (1920 - text_px(line, 2)) / 2, 500, 2, 244, 242, 236, line);
@@ -562,13 +701,24 @@ static void paint(void) {
   draw_disc(&d, 40, 52, 12, 212, 166, 86);
   draw_text(&d, 64, 22, 1, 244, 242, 236, "YouTube");
   draw_text(&d, 64, 54, 1, 168, 170, 180, "Music");
+  {
+    const char *mode = "Choosing a section";
+    if (g_zone != ZONE_NAV) {
+      if (g_body == BODY_HOME) mode = "Browsing shelves";
+      else if (g_body == BODY_SEARCH) mode = "Searching";
+      else if (g_body == BODY_LIBRARY) mode = "Saved songs";
+      else if (g_body == BODY_ACCOUNT) mode = ytm_signed_in() ? "Signed in" : "Signing in";
+      else mode = "Song list";
+    }
+    draw_text(&d, 28, 104, 1, 212, 166, 86, mode);
+  }
 
-  for (int i = 0; i < 3; i++) {
-    int y = 150 + i * 78;
+  for (int i = 0; i < NAV_QUIT; i++) {
+    int y = 156 + i * 68;
     int on = (g_nav == i);
     if (on) {
-      fill_v(&d, 0, y - 8, 6, 52, 212, 166, 86);
-      if (g_zone == ZONE_NAV) fill_v(&d, 16, y - 8, RAIL - 32, 52, 32, 34, 44);
+      fill_v(&d, 0, y - 8, 6, 48, 212, 166, 86);
+      if (g_zone == ZONE_NAV) fill_v(&d, 16, y - 8, RAIL - 32, 48, 32, 34, 44);
     }
     draw_text(&d, 36, y, 1, on ? 244 : 150, on ? 242 : 152, on ? 236 : 164, nav_name[i]);
   }
@@ -629,6 +779,32 @@ static void paint(void) {
     if (g_status[0]) {
       fit(line, (int)sizeof line, g_status, 1, 1400);
       draw_text(&d, RAIL + 28, 640, 1, 232, 120, 96, line);
+    }
+  } else if (g_body == BODY_ACCOUNT) {
+    const char *shown = g_verify_url;
+    draw_text(&d, RAIL + 28, 28, 2, 244, 242, 236, ytm_signed_in() ? "Account" : "Sign in");
+    if (!ytm_signed_in()) {
+      if (strncmp(shown, "https://", 8) == 0) shown += 8;
+      else if (strncmp(shown, "http://", 7) == 0) shown += 7;
+      draw_text(&d, RAIL + 28, 120, 1, 168, 170, 180, "On a phone or computer, open");
+      draw_text(&d, RAIL + 28, 164, 1, 212, 166, 86, shown[0] ? shown : "google.com/device");
+      draw_text(&d, RAIL + 28, 220, 1, 168, 170, 180, "and enter this code");
+      draw_text(&d, RAIL + 28, 280, 2, 244, 242, 236, g_user_code[0] ? g_user_code : "...");
+      if (g_status[0]) {
+        fit(line, (int)sizeof line, g_status, 1, 1400);
+        draw_text(&d, RAIL + 28, 380, 1, 232, 160, 110, line);
+      }
+      draw_text(&d, RAIL + 28, 450, 1, 150, 152, 164, "X asks for a new code if this one expires");
+    } else {
+      const char *rows[] = {"Liked songs", "Sign out"};
+      draw_text(&d, RAIL + 28, 120, 1, 168, 170, 180, "YouTube Music is linked to this console");
+      for (int i = 0; i < 2; i++) {
+        int y = 200 + i * 100;
+        int sel = (g_zone == ZONE_BODY && g_acct_sel == i);
+        if (sel) fill_v(&d, RAIL + 16, y, 900, 80, 32, 34, 44);
+        if (sel) fill_v(&d, RAIL + 16, y, 6, 80, 212, 166, 86);
+        draw_text(&d, RAIL + 40, y + 22, 1, 244, 242, 236, rows[i]);
+      }
     }
   } else {
     Track *list = g_body == BODY_LIBRARY ? g_likes : g_results;
@@ -765,13 +941,15 @@ static void poll_input(void) {
   if (edge(SDL_CONTROLLER_BUTTON_B)) on_back();
   if (edge(SDL_CONTROLLER_BUTTON_X)) on_like();
   if (edge(SDL_CONTROLLER_BUTTON_Y)) g_player_ui = !g_player_ui;
-  if (edge(SDL_CONTROLLER_BUTTON_START)) {
+  /* This pad reports the touchpad as start and Options as back. */
+  if (edge(SDL_CONTROLLER_BUTTON_BACK)) {
     g_body = BODY_SEARCH;
     g_zone = ZONE_BODY;
     g_player_ui = 0;
     g_nav = NAV_SEARCH;
+    g_auth_wait = 0;
   }
-  if (edge(SDL_CONTROLLER_BUTTON_BACK)) {
+  if (edge(SDL_CONTROLLER_BUTTON_START)) {
     g_repeat = (g_repeat + 1) % 3;
     set_status(g_repeat == REP_ONE ? "Repeat one" : g_repeat == REP_ALL ? "Repeat all" : "Repeat off");
   }
@@ -829,16 +1007,37 @@ int main(int argc, char **argv) {
     set_status(err);
     toast(err);
   }
-  if (net_init(err, (int)sizeof err) != 0) {
-    set_status(err);
-    toast(err);
-  } else if (!g_status[0]) {
-    set_status("Pick a shelf. X plays it.");
+  {
+    int net_ok = net_init(err, (int)sizeof err) == 0;
+    if (!net_ok) {
+      set_status(err);
+      toast(err);
+    } else if (!g_status[0]) {
+      set_status("Pick a shelf. X plays it.");
+    }
+    library_load();
+    if (net_ok) auth_load();
   }
-  library_load();
 
   while (g_run) {
     poll_input();
+    if (g_auth_wait && g_body == BODY_ACCOUNT && !g_player_ui && !ytm_signed_in() &&
+        SDL_GetTicks() >= g_auth_next) {
+      char aerr[192];
+      int rc;
+      g_auth_next = SDL_GetTicks() + (Uint32)g_auth_interval * 1000u;
+      rc = ytm_auth_poll(aerr, (int)sizeof aerr);
+      if (rc == 0) {
+        g_auth_wait = 0;
+        auth_save();
+        set_status("Signed in");
+        toast("Signed in to YouTube Music");
+      } else if (rc < 0) {
+        g_auth_wait = 0;
+        set_status(aerr);
+        toast(aerr);
+      }
+    }
     maybe_advance();
     paint();
     SDL_Delay(16);

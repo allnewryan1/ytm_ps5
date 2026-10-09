@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Prototypes match ps5-payload-dev/sdk samples/http2_get plus the
  * sceHttp2AddRequestHeader entry the stub exports (same shape as sceHttp). */
@@ -199,9 +200,14 @@ void net_shutdown(void) {
   g_tmpl = g_http = g_ssl = g_net = -1;
 }
 
+static char g_access[2048];
+static char g_refresh[1024];
+static char g_device_code[256];
+static time_t g_access_exp;
+
 static int http_post_ex(const char *url, const char *body, const char *ua, const char *origin,
                          const char *referer, const char *client_name, const char *client_ver,
-                         int *status, char *err, int err_n) {
+                         int authed, int soft, int *status, char *err, int err_n) {
   int req;
   int total = 0;
   int n;
@@ -225,6 +231,11 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
     sceHttp2AddRequestHeader(req, "X-YouTube-Client-Name", client_name, SCE_HTTP_HEADER_OVERWRITE);
   if (client_ver)
     sceHttp2AddRequestHeader(req, "X-YouTube-Client-Version", client_ver, SCE_HTTP_HEADER_OVERWRITE);
+  if (authed && g_access[0]) {
+    char auth[2100];
+    snprintf(auth, sizeof auth, "Bearer %s", g_access);
+    sceHttp2AddRequestHeader(req, "Authorization", auth, SCE_HTTP_HEADER_OVERWRITE);
+  }
   if (sceHttp2SendRequest(req, body, body_n) != 0) {
     sceHttp2DeleteRequest(req);
     snprintf(err, (size_t)err_n, "HTTP send failed");
@@ -238,11 +249,11 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
   }
   g_resp[total] = 0;
   sceHttp2DeleteRequest(req);
-  if (*status != 200) {
+  if (*status != 200 && !soft) {
     snprintf(err, (size_t)err_n, "YouTube HTTP %d", *status);
     return -1;
   }
-  if (total < 2) {
+  if (total < 2 && !soft) {
     snprintf(err, (size_t)err_n, "Empty response");
     return -1;
   }
@@ -252,7 +263,7 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
 
 static int http_post(const char *url, const char *body, int *status, char *err, int err_n) {
   return http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
-                      NULL, NULL, status, err, err_n);
+                      NULL, NULL, 0, 0, status, err, err_n);
 }
 
 static int collect_tracks(const char *json, Track *out, int max) {
@@ -412,7 +423,7 @@ int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration,
            "\"contentCheckOk\":true,\"racyCheckOk\":true}",
            ua, video_id);
   if (http_post_ex(endpoint, body, ua, "https://www.youtube.com", "https://www.youtube.com/",
-                   "101", "1.02", &status, err, err_n) < 0) {
+                   "101", "1.02", 0, 0, &status, err, err_n) < 0) {
     return -1;
   }
   json_int(g_resp, "lengthSeconds", &len);
@@ -437,4 +448,186 @@ int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration,
       snprintf(err, (size_t)err_n, "No audio URL in the player response");
   }
   return -1;
+}
+
+/* Identity published by https://www.youtube.com/tv for its device-code sign-in.
+ * OAuth on Innertube only works as this TV client, not as the music web client. */
+static const char *TV_CLIENT_ID =
+    "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com";
+static const char *TV_CLIENT_SECRET = "SboVhoG9s0rNafixCSGGKXAT";
+static const char *TV_VER = "7.20261007.13.00";
+static const char *TV_UA = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version";
+
+static void take_tokens(void) {
+  char access[2048];
+  char refresh[1024];
+  int exp = 3600;
+  access[0] = 0;
+  refresh[0] = 0;
+  json_string(g_resp, "access_token", access, (int)sizeof access);
+  json_string(g_resp, "refresh_token", refresh, (int)sizeof refresh);
+  json_int(g_resp, "expires_in", &exp);
+  if (access[0]) {
+    snprintf(g_access, sizeof g_access, "%s", access);
+    if (exp < 120) exp = 120;
+    g_access_exp = time(NULL) + exp - 60;
+  }
+  if (refresh[0]) snprintf(g_refresh, sizeof g_refresh, "%s", refresh);
+}
+
+static int token_error(char *err, int err_n) {
+  char code[64];
+  if (!json_string(g_resp, "error", code, (int)sizeof code)) {
+    snprintf(err, (size_t)err_n, "Sign-in failed");
+    return -1;
+  }
+  if (strcmp(code, "authorization_pending") == 0 || strcmp(code, "slow_down") == 0) return 1;
+  if (strcmp(code, "access_denied") == 0)
+    snprintf(err, (size_t)err_n, "Sign-in was declined");
+  else if (strcmp(code, "expired_token") == 0)
+    snprintf(err, (size_t)err_n, "That code expired. Press X for a new one");
+  else if (strcmp(code, "invalid_grant") == 0)
+    snprintf(err, (size_t)err_n, "Sign-in expired. Press X to start again");
+  else
+    snprintf(err, (size_t)err_n, "Sign-in failed (%s)", code);
+  return -1;
+}
+
+int ytm_signed_in(void) { return g_access[0] != 0 && time(NULL) < g_access_exp; }
+
+const char *ytm_refresh_token(void) { return g_refresh; }
+
+void ytm_set_refresh_token(const char *token) {
+  snprintf(g_refresh, sizeof g_refresh, "%s", token ? token : "");
+}
+
+void ytm_auth_signout(void) {
+  g_access[0] = 0;
+  g_refresh[0] = 0;
+  g_device_code[0] = 0;
+  g_access_exp = 0;
+}
+
+int ytm_auth_begin(char *user_code, int code_n, char *verify_url, int url_n, int *interval,
+                   char *err, int err_n) {
+  char body[640];
+  char dev[40];
+  unsigned seed;
+  int status = 0;
+  int n;
+  int exp = 1800;
+  seed = (unsigned)time(NULL);
+  snprintf(dev, sizeof dev, "%08x-%04x-%04x-%04x-%012x", seed, (seed >> 4) & 0xffff,
+           (seed >> 8) & 0xffff, (seed * 3) & 0xffff, seed * 17u);
+  snprintf(body, sizeof body,
+           "{\"client_id\":\"%s\",\"scope\":\"http://gdata.youtube.com "
+           "https://www.googleapis.com/auth/youtube-paid-content\","
+           "\"device_id\":\"%s\",\"device_model\":\"ytlr::\"}",
+           TV_CLIENT_ID, dev);
+  n = http_post_ex("https://www.youtube.com/o/oauth2/device/code", body, TV_UA,
+                   "https://www.youtube.com", "https://www.youtube.com/tv", NULL, NULL, 0, 1,
+                   &status, err, err_n);
+  if (n < 2 || status != 200) {
+    if (err[0] == 0) snprintf(err, (size_t)err_n, "Could not start sign-in");
+    if (status && status != 200) token_error(err, err_n);
+    return -1;
+  }
+  if (!json_string(g_resp, "device_code", g_device_code, (int)sizeof g_device_code) ||
+      !json_string(g_resp, "user_code", user_code, code_n)) {
+    snprintf(err, (size_t)err_n, "Sign-in response had no code");
+    return -1;
+  }
+  if (!json_string(g_resp, "verification_url", verify_url, url_n))
+    snprintf(verify_url, (size_t)url_n, "%s", "https://www.google.com/device");
+  *interval = 5;
+  json_int(g_resp, "interval", interval);
+  if (*interval < 5) *interval = 5;
+  json_int(g_resp, "expires_in", &exp);
+  (void)exp;
+  err[0] = 0;
+  return 0;
+}
+
+static int post_token(const char *body, char *err, int err_n) {
+  int status = 0;
+  int n = http_post_ex("https://www.youtube.com/o/oauth2/token", body, TV_UA,
+                       "https://www.youtube.com", "https://www.youtube.com/tv", NULL, NULL, 0, 1,
+                       &status, err, err_n);
+  if (n < 2) {
+    if (err[0] == 0) snprintf(err, (size_t)err_n, "Sign-in request failed");
+    return -1;
+  }
+  if (status == 200 && strstr(g_resp, "access_token")) {
+    take_tokens();
+    if (!g_access[0]) {
+      snprintf(err, (size_t)err_n, "Sign-in response had no token");
+      return -1;
+    }
+    err[0] = 0;
+    return 0;
+  }
+  return token_error(err, err_n);
+}
+
+int ytm_auth_poll(char *err, int err_n) {
+  char body[1600];
+  if (!g_device_code[0]) {
+    snprintf(err, (size_t)err_n, "Sign-in has not started");
+    return -1;
+  }
+  snprintf(body, sizeof body,
+           "{\"client_id\":\"%s\",\"client_secret\":\"%s\",\"code\":\"%s\","
+           "\"grant_type\":\"http://oauth.net/grant_type/device/1.0\"}",
+           TV_CLIENT_ID, TV_CLIENT_SECRET, g_device_code);
+  return post_token(body, err, err_n);
+}
+
+int ytm_auth_refresh(char *err, int err_n) {
+  char body[1600];
+  int rc;
+  if (!g_refresh[0]) {
+    snprintf(err, (size_t)err_n, "Not signed in");
+    return -1;
+  }
+  snprintf(body, sizeof body,
+           "{\"client_id\":\"%s\",\"client_secret\":\"%s\",\"refresh_token\":\"%s\","
+           "\"grant_type\":\"refresh_token\"}",
+           TV_CLIENT_ID, TV_CLIENT_SECRET, g_refresh);
+  rc = post_token(body, err, err_n);
+  if (rc == 0) g_device_code[0] = 0;
+  return rc;
+}
+
+static int ensure_access(char *err, int err_n) {
+  if (g_access[0] && time(NULL) < g_access_exp) return 0;
+  return ytm_auth_refresh(err, err_n);
+}
+
+static int browse_tracks(const char *host, const char *browse_id, Track *out, int max, char *err,
+                         int err_n) {
+  char body[512];
+  char url[192];
+  int status = 0;
+  int n;
+  snprintf(url, sizeof url, "https://%s/youtubei/v1/browse?prettyPrint=false", host);
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
+           "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "\"browseId\":\"%s\"}",
+           TV_VER, browse_id);
+  if (http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
+                   TV_VER, 1, 0, &status, err, err_n) < 0)
+    return -1;
+  n = collect_tracks(g_resp, out, max);
+  if (n == 0) snprintf(err, (size_t)err_n, "No songs in that library");
+  return n;
+}
+
+int ytm_liked(Track *out, int max, char *err, int err_n) {
+  int n;
+  if (ensure_access(err, err_n) != 0) return -1;
+  n = browse_tracks("music.youtube.com", "FEmusic_liked_videos", out, max, err, err_n);
+  if (n > 0) return n;
+  n = browse_tracks("www.youtube.com", "VLLM", out, max, err, err_n);
+  return n;
 }
