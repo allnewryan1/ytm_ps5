@@ -32,4 +32,8 @@ void ytm_set_refresh_token(const char *token);
 /* Liked songs for the signed-in account. */
 int ytm_liked(Track *out, int max, char *err, int err_n);
 
+/* Download one cover into the cache. Safe to call again. */
+int ytm_cover_fetch(const Track *t);
+const unsigned char *ytm_cover_pixels(const Track *t, int *w, int *h);
+
 #endif

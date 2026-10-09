@@ -174,44 +174,120 @@ void fill_round(Draw *d, int x, int y, int w, int h, int rad, int r, int g, int 
   }
 }
 
+static unsigned utf8_next(const unsigned char **p) {
+  const unsigned char *s = *p;
+  unsigned cp;
+  if (s[0] < 0x80) {
+    *p = s + 1;
+    return s[0];
+  }
+  if ((s[0] & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+    cp = ((unsigned)(s[0] & 0x1F) << 6) | (unsigned)(s[1] & 0x3F);
+    *p = s + 2;
+    return cp < 0x80 ? (unsigned)'?' : cp;
+  }
+  if ((s[0] & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+    cp = ((unsigned)(s[0] & 0x0F) << 12) | ((unsigned)(s[1] & 0x3F) << 6) | (unsigned)(s[2] & 0x3F);
+    *p = s + 3;
+    return cp;
+  }
+  if ((s[0] & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 &&
+      (s[3] & 0xC0) == 0x80) {
+    cp = ((unsigned)(s[0] & 0x07) << 18) | ((unsigned)(s[1] & 0x3F) << 12) |
+         ((unsigned)(s[2] & 0x3F) << 6) | (unsigned)(s[3] & 0x3F);
+    *p = s + 4;
+    return cp;
+  }
+  *p = s + 1;
+  return (unsigned)'?';
+}
+
+static const UiGlyph *glyph_for(unsigned cp) {
+  int lo = 0;
+  int hi = UI_FONT_N - 1;
+  if (cp < 32) cp = (unsigned)'?';
+  while (lo <= hi) {
+    int mid = (lo + hi) >> 1;
+    unsigned c = ui_font_cp[mid];
+    if (c == cp) return &ui_font_glyph[mid];
+    if (c < cp) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return &ui_font_glyph['?' - 32];
+}
+
 int text_px(const char *s, int scale) {
+  const unsigned char *p;
   int w = 0;
   if (!s || scale < 1) return 0;
-  for (int i = 0; s[i]; i++) {
-    unsigned char ch = (unsigned char)s[i];
-    if (ch < 32 || ch > 126) ch = '?';
-    w += ui_font_glyph[ch - 32].advance * scale;
+  p = (const unsigned char *)s;
+  while (*p) {
+    unsigned cp = utf8_next(&p);
+    if (cp < 32) continue;
+    w += glyph_for(cp)->advance * scale;
   }
   return w;
 }
 
 void draw_text(Draw *d, int x, int y, int scale, int r, int g, int b, const char *s) {
+  const unsigned char *p;
   int pen;
   if (!s || scale < 1 || !d->surf) return;
   pen = d->ox + (int)(x * d->s);
   y = d->oy + (int)(y * d->s);
   scale = (int)(scale * d->s);
   if (scale < 1) scale = 1;
-  for (int i = 0; s[i]; i++) {
-    unsigned char ch = (unsigned char)s[i];
+  p = (const unsigned char *)s;
+  while (*p) {
+    unsigned cp = utf8_next(&p);
     const UiGlyph *gl;
     const unsigned char *px;
-    if (ch < 32 || ch > 126) ch = '?';
-    gl = &ui_font_glyph[ch - 32];
+    int row, col;
+    if (cp < 32) continue;
+    gl = glyph_for(cp);
     px = ui_font_px + gl->off;
-    for (int row = 0; row < gl->h; row++) {
-      for (int col = 0; col < gl->w; col++) {
+    for (row = 0; row < gl->h; row++) {
+      for (col = 0; col < gl->w; col++) {
         int a = px[row * gl->w + col];
         int dx, dy;
         if (a < 12) continue;
         for (dy = 0; dy < scale; dy++) {
           for (dx = 0; dx < scale; dx++) {
-            put_px(d, pen + (gl->xoff + col) * scale + dx,
-                   y + (gl->yoff + row) * scale + dy, r, g, b, a);
+            put_px(d, pen + (gl->xoff + col) * scale + dx, y + (gl->yoff + row) * scale + dy, r, g,
+                   b, a);
           }
         }
       }
     }
     pen += gl->advance * scale;
+  }
+}
+
+void blit_cover(Draw *d, int x, int y, int size, const unsigned char *px, int sw, int sh) {
+  int x0, y0, pw, prad, side, sx0, sy0, row;
+  if (!d->surf || !px || size < 1 || sw < 1 || sh < 1 || d->bpp != 4 || !d->surf->pixels) return;
+  x0 = d->ox + (int)(x * d->s);
+  y0 = d->oy + (int)(y * d->s);
+  pw = (int)(size * d->s);
+  if (pw < 1) pw = 1;
+  prad = (int)((size > 200 ? 28 : size > 100 ? 20 : 16) * d->s);
+  if (prad < 1) prad = 1;
+  if (prad > pw / 2) prad = pw / 2;
+  side = sw < sh ? sw : sh;
+  sx0 = (sw - side) / 2;
+  sy0 = (sh - side) / 2;
+  for (row = 0; row < pw; row++) {
+    int inset = 0;
+    int col;
+    if (row < prad) inset = round_inset(row, prad);
+    else if (row >= pw - prad) inset = round_inset(pw - 1 - row, prad);
+    for (col = inset; col < pw - inset; col++) {
+      int sx = sx0 + (col * side) / pw;
+      int sy = sy0 + (row * side) / pw;
+      const unsigned char *s;
+      if (sx < 0 || sy < 0 || sx >= sw || sy >= sh) continue;
+      s = px + ((size_t)sy * (size_t)sw + (size_t)sx) * 4u;
+      put_px(d, x0 + col, y0 + row, s[0], s[1], s[2], s[3] ? s[3] : 255);
+    }
   }
 }

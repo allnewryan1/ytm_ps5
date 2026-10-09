@@ -25,7 +25,7 @@ endif
 
 ELF := ytmusic.elf
 
-SRCS := src/main.c src/text.c src/net.c src/player.c src/latebind.c
+SRCS := src/main.c src/text.c src/net.c src/player.c src/latebind.c src/art.c
 
 CFLAGS += -std=c11 -Wall -Wextra -Wno-unused-parameter -O2 -g \
 	-I$(HB_INC) -I$(HB_INC)/SDL2 -D_REENTRANT

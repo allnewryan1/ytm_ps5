@@ -1,4 +1,5 @@
 #include "net.h"
+#include "art.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -37,6 +38,25 @@ static int g_http = -1;
 static int g_tmpl = -1;
 static char *g_resp;
 
+#define COVER_SIDE 128
+#define COVER_SLOTS 18
+typedef struct {
+  char key[80];
+  unsigned char *px;
+} CoverSlot;
+static CoverSlot g_cover[COVER_SLOTS];
+static int g_cover_n;
+
+static void cover_clear(void) {
+  int i;
+  for (i = 0; i < COVER_SLOTS; i++) {
+    free(g_cover[i].px);
+    g_cover[i].px = NULL;
+    g_cover[i].key[0] = 0;
+  }
+  g_cover_n = 0;
+}
+
 static int hex_nibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -44,40 +64,85 @@ static int hex_nibble(char c) {
   return -1;
 }
 
+static void emit_cp(char *dst, int n, int *o, unsigned cp) {
+  if (cp < 32) cp = ' ';
+  if (cp == 0xA0) cp = ' ';
+  if (cp < 0x80) {
+    if (*o + 1 < n) dst[(*o)++] = (char)cp;
+  } else if (cp < 0x800) {
+    if (*o + 2 < n) {
+      dst[(*o)++] = (char)(0xC0 | (cp >> 6));
+      dst[(*o)++] = (char)(0x80 | (cp & 0x3F));
+    }
+  } else if (cp < 0x10000) {
+    if (*o + 3 < n) {
+      dst[(*o)++] = (char)(0xE0 | (cp >> 12));
+      dst[(*o)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+      dst[(*o)++] = (char)(0x80 | (cp & 0x3F));
+    }
+  } else if (cp <= 0x10FFFF) {
+    if (*o + 4 < n) {
+      dst[(*o)++] = (char)(0xF0 | (cp >> 18));
+      dst[(*o)++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+      dst[(*o)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+      dst[(*o)++] = (char)(0x80 | (cp & 0x3F));
+    }
+  }
+}
+
+static int decode_u(const char *s, unsigned *cp) {
+  int h1, h2, h3, h4;
+  if (s[0] != '\\' || s[1] != 'u') return 0;
+  h1 = hex_nibble(s[2]);
+  h2 = hex_nibble(s[3]);
+  h3 = hex_nibble(s[4]);
+  h4 = hex_nibble(s[5]);
+  if (h1 < 0 || h2 < 0 || h3 < 0 || h4 < 0) return 0;
+  *cp = (unsigned)((h1 << 12) | (h2 << 8) | (h3 << 4) | h4);
+  return 6;
+}
+
 static void copy_json_str(const char *src, char *dst, int n) {
   int o = 0;
   if (n <= 0) return;
   while (*src && *src != '"') {
-    unsigned char ch;
     if (*src == '\\') {
-      src++;
-      if (*src == 'u' && src[1] && src[2] && src[3] && src[4]) {
-        int h1 = hex_nibble(src[1]);
-        int h2 = hex_nibble(src[2]);
-        int h3 = hex_nibble(src[3]);
-        int h4 = hex_nibble(src[4]);
-        src += 5;
-        if (h1 < 0 || h2 < 0 || h3 < 0 || h4 < 0) ch = '?';
-        else {
-          int cp = (h1 << 12) | (h2 << 8) | (h3 << 4) | h4;
-          ch = (cp >= 0 && cp < 128) ? (unsigned char)cp : (unsigned char)'?';
+      unsigned cp = 0;
+      int used = decode_u(src, &cp);
+      if (used) {
+        src += used;
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+          unsigned lo = 0;
+          int u2 = decode_u(src, &lo);
+          if (u2 && lo >= 0xDC00 && lo <= 0xDFFF) {
+            cp = 0x10000u + (((cp - 0xD800u) << 10) | (lo - 0xDC00u));
+            src += u2;
+          } else {
+            continue;
+          }
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+          continue;
         }
-      } else if (*src == 0) {
-        break;
-      } else if (*src == 'n') {
-        ch = ' ';
-        src++;
-      } else if (*src == 't') {
-        ch = ' ';
-        src++;
-      } else {
-        ch = (unsigned char)*src++;
+        if (cp == 0) continue;
+        emit_cp(dst, n, &o, cp);
+        continue;
       }
-    } else {
-      ch = (unsigned char)*src++;
+      src++;
+      if (*src == 0) break;
+      if (*src == 'n' || *src == 't' || *src == 'r') {
+        emit_cp(dst, n, &o, ' ');
+        src++;
+        continue;
+      }
+      emit_cp(dst, n, &o, (unsigned char)*src);
+      src++;
+      continue;
     }
-    if (ch < 32) ch = ' ';
-    if (o + 1 < n) dst[o++] = (char)ch;
+    {
+      unsigned char ch = (unsigned char)*src++;
+      if (ch < 32) ch = ' ';
+      if (o + 1 < n) dst[o++] = (char)ch;
+    }
   }
   dst[o] = 0;
 }
@@ -138,8 +203,9 @@ static int junk_label(const char *s) {
   static const char *bad[] = {
       "SONG", "Song", "Songs", "ALBUM", "Album", "ARTIST", "Artist",
       "Explicit", "MUSIC", "Music", "Watch", "Shuffle", "Play", "plays",
-      "views", "VIDEO", "Episode", "Sign in", "Play next", "Start mix",
-      "Like this song", "Save this for later", "Music videos", NULL};
+      "views", "VIDEO", "Video", "Episode", "Sign in", "Play next", "Start mix",
+      "Like this song", "Save this for later", "Music videos", "Playlist", "Profile",
+      "Podcast", "Single", "EP", NULL};
   if (!s || !s[0]) return 1;
   for (int i = 0; bad[i]; i++) {
     if (strcmp(s, bad[i]) == 0) return 1;
@@ -196,6 +262,7 @@ void net_shutdown(void) {
   if (g_http >= 0) sceHttp2Term(g_http);
   if (g_ssl >= 0) sceSslTerm(g_ssl);
   if (g_net >= 0) sceNetPoolDestroy(g_net);
+  cover_clear();
   free(g_resp);
   g_resp = NULL;
   g_tmpl = g_http = g_ssl = g_net = -1;
@@ -239,6 +306,7 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
     char auth[2100];
     snprintf(auth, sizeof auth, "Bearer %s", g_access);
     sceHttp2AddRequestHeader(req, "Authorization", auth, SCE_HTTP_HEADER_OVERWRITE);
+    sceHttp2AddRequestHeader(req, "X-Goog-AuthUser", "0", SCE_HTTP_HEADER_OVERWRITE);
   }
   if (sceHttp2SendRequest(req, body, body_n) != 0) {
     sceHttp2DeleteRequest(req);
@@ -270,70 +338,424 @@ static int http_post(const char *url, const char *body, int *status, char *err, 
                       NULL, NULL, 0, 0, status, err, err_n);
 }
 
-static int collect_tracks(const char *json, Track *out, int max) {
-  const char *p = json;
-  int count = 0;
-  while (count < max && (p = strstr(p, "\"videoId\":\"")) != NULL) {
-    char id[16];
-    char labels[6][YTM_TITLE_LEN];
-    int nlab = 0;
-    const char *at = p;
-    const char *q;
-    const char *base;
-    p += 11;
-    if ((int)strlen(p) < 12 || p[11] != '"') {
-      p = at + 11;
+static const char *find_bounded(const char *p, const char *end, const char *pat) {
+  size_t n = strlen(pat);
+  if (!p || !end || end < p || (size_t)(end - p) < n) return NULL;
+  for (; p + n <= end; p++) {
+    if (memcmp(p, pat, n) == 0) return p;
+  }
+  return NULL;
+}
+
+static const char *json_end(const char *p) {
+  char open;
+  int depth = 0;
+  int in_str = 0;
+  if (!p || (*p != '{' && *p != '[')) return p ? p + 1 : p;
+  open = *p;
+  (void)open;
+  for (; *p; p++) {
+    if (in_str) {
+      if (*p == '\\' && p[1]) {
+        p++;
+        continue;
+      }
+      if (*p == '"') in_str = 0;
       continue;
     }
-    memcpy(id, p, 11);
-    id[11] = 0;
-    p += 12;
-    if (!id_ok(id)) continue;
-    for (int i = 0; i < count; i++) {
-      if (strcmp(out[i].id, id) == 0) {
-        id[0] = 0;
-        break;
-      }
+    if (*p == '"') {
+      in_str = 1;
+      continue;
     }
-    if (!id[0]) continue;
-
-    base = json;
-    if (at - json > 1600) base = at - 1600;
-    q = base;
-    while (nlab < 6 && (q = strstr(q, "\"text\":\"")) != NULL && q < at) {
-      char tmp[YTM_TITLE_LEN];
-      q += 8;
-      copy_json_str(q, tmp, (int)sizeof tmp);
-      if (!junk_label(tmp) && strlen(tmp) > 1) {
-        snprintf(labels[nlab], sizeof labels[nlab], "%s", tmp);
-        nlab++;
-      }
+    if (*p == '{' || *p == '[') depth++;
+    else if (*p == '}' || *p == ']') {
+      depth--;
+      if (depth == 0) return p + 1;
     }
-
-    memset(&out[count], 0, sizeof out[count]);
-    memcpy(out[count].id, id, sizeof out[count].id);
-    out[count].seconds = 0;
-    out[count].album[0] = 0;
-    if (nlab >= 2 && clock_seconds(labels[nlab - 1]) >= 0) {
-      out[count].seconds = clock_seconds(labels[nlab - 1]);
-      nlab--;
-    }
-    if (nlab >= 3) {
-      snprintf(out[count].title, sizeof out[count].title, "%s", labels[nlab - 3]);
-      snprintf(out[count].artist, sizeof out[count].artist, "%s", labels[nlab - 2]);
-      snprintf(out[count].album, sizeof out[count].album, "%s", labels[nlab - 1]);
-    } else if (nlab >= 2) {
-      snprintf(out[count].title, sizeof out[count].title, "%s", labels[nlab - 2]);
-      snprintf(out[count].artist, sizeof out[count].artist, "%s", labels[nlab - 1]);
-    } else if (nlab == 1) {
-      snprintf(out[count].title, sizeof out[count].title, "%s", labels[0]);
-      snprintf(out[count].artist, sizeof out[count].artist, "%s", "YouTube Music");
-    } else {
-      snprintf(out[count].title, sizeof out[count].title, "%s", id);
-      snprintf(out[count].artist, sizeof out[count].artist, "%s", "YouTube Music");
-    }
-    count++;
   }
+  return p;
+}
+
+static int is_sep(const char *s) {
+  const unsigned char *p = (const unsigned char *)s;
+  int marks = 0;
+  if (!s || !s[0]) return 0;
+  while (*p) {
+    if (*p == ' ' || *p == '\t') {
+      p++;
+      continue;
+    }
+    if (p[0] == 0xE2 && p[1] == 0x80 && (p[2] == 0xA2 || p[2] == 0xA7)) {
+      marks++;
+      p += 3;
+      continue;
+    }
+    if (*p == '|' || *p == 0xB7) {
+      marks++;
+      p++;
+      continue;
+    }
+    return 0;
+  }
+  return marks > 0;
+}
+
+static int is_noise(const char *s) {
+  if (!s || !s[0]) return 1;
+  if (junk_label(s)) return 1;
+  if (strstr(s, " view") || strstr(s, " play") || strstr(s, "audience") || strstr(s, "listener") ||
+      strstr(s, " ago") || strstr(s, "monthly") || strstr(s, "subscriber"))
+    return 1;
+  if (strlen(s) > 3 && s[3] == ' ') {
+    static const char *mon = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    int i;
+    for (i = 0; i < 36; i += 3) {
+      if (strncmp(s, mon + i, 3) == 0) return 1;
+    }
+  }
+  return 0;
+}
+
+static void store_thumb(Track *t, const char *url) {
+  const char *eq;
+  int n;
+  if (t->id[0]) {
+    snprintf(t->thumb, sizeof t->thumb, "https://i.ytimg.com/vi/%s/mqdefault.jpg", t->id);
+    return;
+  }
+  if (!url || !url[0]) return;
+  eq = strstr(url, "=w");
+  if (!eq) eq = strstr(url, "=s");
+  if (eq && (int)(eq - url) < (int)sizeof t->thumb - 18) {
+    n = (int)(eq - url);
+    memcpy(t->thumb, url, (size_t)n);
+    snprintf(t->thumb + n, sizeof t->thumb - (size_t)n, "=w240-h240-rj");
+    return;
+  }
+  if ((int)strlen(url) < (int)sizeof t->thumb) snprintf(t->thumb, sizeof t->thumb, "%s", url);
+}
+
+static void finish_track(Track *t) {
+  if (!t->title[0]) {
+    if (t->id[0]) snprintf(t->title, sizeof t->title, "%s", t->id);
+    else if (t->browse[0]) snprintf(t->title, sizeof t->title, "%s", "Playlist");
+  }
+  if (!t->artist[0])
+    snprintf(t->artist, sizeof t->artist, "%s", t->browse[0] && !t->id[0] ? "Playlist" : "YouTube Music");
+  store_thumb(t, t->thumb);
+}
+
+static int take_vid(const char *p, const char *end, char *id) {
+  if (!p || p + 12 > end || p[11] != '"') return 0;
+  memcpy(id, p, 11);
+  id[11] = 0;
+  return id_ok(id);
+}
+
+static void note_part(Track *t, const char *s) {
+  int sec;
+  if (!s || !s[0] || is_sep(s)) return;
+  sec = clock_seconds(s);
+  if (sec >= 0) {
+    if (t->seconds <= 0) t->seconds = sec;
+    return;
+  }
+  if (is_noise(s)) return;
+  if (t->title[0] && strcmp(s, t->title) == 0) return;
+  if (t->artist[0] && strcmp(s, t->artist) == 0) return;
+  if (!t->title[0]) snprintf(t->title, sizeof t->title, "%s", s);
+  else if (!t->artist[0]) snprintf(t->artist, sizeof t->artist, "%s", s);
+  else if (!t->album[0] && strcmp(s, t->artist) != 0) snprintf(t->album, sizeof t->album, "%s", s);
+}
+
+static void push_field(char *cur, Track *t) {
+  if (cur[0]) note_part(t, cur);
+  cur[0] = 0;
+}
+
+static void runs_into(const char *s, const char *end, Track *t, int as_title) {
+  const char *p = s;
+  char cur[YTM_TITLE_LEN];
+  char piece[YTM_TITLE_LEN];
+  if (as_title) {
+    const char *tx = find_bounded(s, end, "\"text\":\"");
+    if (!tx) tx = find_bounded(s, end, "\"simpleText\":\"");
+    if (!tx) return;
+    copy_json_str(tx + (tx[1] == 's' ? 14 : 8), piece, (int)sizeof piece);
+    if (piece[0] && !t->title[0]) snprintf(t->title, sizeof t->title, "%s", piece);
+    return;
+  }
+  cur[0] = 0;
+  while (p && p < end) {
+    const char *a = find_bounded(p, end, "\"text\":\"");
+    const char *b = find_bounded(p, end, "\"simpleText\":\"");
+    const char *hit;
+    int simple;
+    if (a && (!b || a <= b)) {
+      hit = a;
+      simple = 0;
+    } else if (b) {
+      hit = b;
+      simple = 1;
+    } else {
+      break;
+    }
+    copy_json_str(hit + (simple ? 14 : 8), piece, (int)sizeof piece);
+    p = hit + (simple ? 14 : 8);
+    if (!piece[0]) continue;
+    if (is_sep(piece)) {
+      push_field(cur, t);
+      continue;
+    }
+    if ((int)strlen(cur) + (int)strlen(piece) + 1 >= (int)sizeof cur) {
+      push_field(cur, t);
+      continue;
+    }
+    memcpy(cur + strlen(cur), piece, strlen(piece) + 1);
+  }
+  push_field(cur, t);
+}
+
+static void add_track(Track *out, int *count, int max, Track *t) {
+  int i;
+  if (!t->id[0] && !t->browse[0]) return;
+  if (!t->title[0] && !t->artist[0]) return;
+  finish_track(t);
+  if (t->id[0]) {
+    for (i = 0; i < *count; i++) {
+      if (out[i].id[0] && strcmp(out[i].id, t->id) == 0) return;
+    }
+  } else if (t->browse[0]) {
+    for (i = 0; i < *count; i++) {
+      if (!out[i].id[0] && strcmp(out[i].browse, t->browse) == 0) return;
+    }
+  }
+  if (*count >= max) return;
+  out[*count] = *t;
+  (*count)++;
+}
+
+static int walk_kind(const char *json, const char *marker, Track *out, int *count, int max,
+                     void (*parse)(const char *, const char *, Track *)) {
+  const char *p = json;
+  while (*count < max && (p = strstr(p, marker)) != NULL) {
+    const char *obj = strchr(p, '{');
+    const char *end;
+    Track t;
+    if (!obj) break;
+    end = json_end(obj);
+    memset(&t, 0, sizeof t);
+    parse(obj, end, &t);
+    add_track(out, count, max, &t);
+    p = end > p ? end : p + 1;
+  }
+  return *count;
+}
+
+static void parse_mrlir(const char *s, const char *end, Track *t) {
+  const char *menu = find_bounded(s, end, "\"menu\":");
+  const char *lim = menu ? menu : end;
+  const char *pid = find_bounded(s, lim, "\"playlistItemData\":");
+  const char *vid = NULL;
+  const char *fc, *fe, *q;
+  const char *fixed;
+  if (pid) {
+    const char *obj = strchr(pid, '{');
+    const char *pend = obj ? json_end(obj) : lim;
+    if (pend > lim) pend = lim;
+    vid = obj ? find_bounded(obj, pend, "\"videoId\":\"") : NULL;
+  }
+  if (!vid) vid = find_bounded(s, lim, "\"videoId\":\"");
+  if (!vid || !take_vid(vid + 11, lim, t->id)) {
+    const char *pl = find_bounded(s, lim, "\"playlistId\":\"");
+    char pid[64];
+    t->id[0] = 0;
+    pid[0] = 0;
+    if (pl) copy_json_str(pl + 14, pid, (int)sizeof pid);
+    /* Radio mixes (RD…) are not a stable shelf. Real playlists browse as VL + id. */
+    if (pid[0] && strncmp(pid, "RD", 2) != 0 && (int)strlen(pid) + 3 < YTM_BROWSE_LEN) {
+      if (strncmp(pid, "VL", 2) == 0)
+        memcpy(t->browse, pid, strlen(pid) + 1);
+      else {
+        t->browse[0] = 'V';
+        t->browse[1] = 'L';
+        memcpy(t->browse + 2, pid, strlen(pid) + 1);
+      }
+    }
+    if (!t->browse[0]) return;
+  }
+  fc = find_bounded(s, lim, "\"flexColumns\":");
+  if (fc) {
+    const char *arr = strchr(fc, '[');
+    fe = arr ? json_end(arr) : lim;
+    if (fe > lim) fe = lim;
+    q = arr ? arr : fc;
+    while (q && (q = find_bounded(q, fe, "\"musicResponsiveListItemFlexColumnRenderer\":"))) {
+      const char *obj = strchr(q, '{');
+      const char *col = obj ? json_end(obj) : fe;
+      if (!obj || col > fe) break;
+      if (!t->title[0]) runs_into(obj, col, t, 1);
+      else runs_into(obj, col, t, 0);
+      q = col;
+    }
+  }
+  fixed = find_bounded(s, lim, "\"fixedColumns\":");
+  if (fixed) {
+    const char *arr = strchr(fixed, '[');
+    const char *fend = arr ? json_end(arr) : lim;
+    const char *tx;
+    if (fend > lim) fend = lim;
+    tx = arr ? find_bounded(arr, fend, "\"text\":\"") : NULL;
+    if (tx) {
+      char tmp[YTM_TITLE_LEN];
+      copy_json_str(tx + 8, tmp, (int)sizeof tmp);
+      if (clock_seconds(tmp) >= 0) t->seconds = clock_seconds(tmp);
+    }
+  }
+}
+
+static void parse_card(const char *s, const char *end, Track *t) {
+  const char *title = find_bounded(s, end, "\"title\":");
+  const char *sub = find_bounded(s, end, "\"subtitle\":");
+  const char *vid = find_bounded(s, end, "\"videoId\":\"");
+  const char *tend;
+  if (!vid || !take_vid(vid + 11, end, t->id)) return;
+  if (title) {
+    const char *obj = strchr(title, '{');
+    tend = obj ? json_end(obj) : (sub ? sub : end);
+    if (obj) runs_into(obj, tend > end ? end : tend, t, 1);
+  }
+  if (sub && sub < end) {
+    const char *obj = strchr(sub, '{');
+    const char *send = obj ? json_end(obj) : end;
+    if (send > end) send = end;
+    if (obj) runs_into(obj, send, t, 0);
+  }
+}
+
+static void parse_tile(const char *s, const char *end, Track *t) {
+  const char *id = find_bounded(s, end, "\"contentId\":\"");
+  const char *meta = find_bounded(s, end, "\"tileMetadataRenderer\":");
+  const char *ov = find_bounded(s, end, "\"thumbnailOverlayTimeStatusRenderer\":");
+  if (!id || !take_vid(id + 13, end, t->id)) return;
+  if (meta) {
+    const char *obj = strchr(meta, '{');
+    const char *mend = obj ? json_end(obj) : end;
+    if (mend > end) mend = end;
+    if (obj) runs_into(obj, mend, t, 0);
+  }
+  if (ov) {
+    const char *obj = strchr(ov, '{');
+    const char *oend = obj ? json_end(obj) : end;
+    const char *tx;
+    if (oend > end) oend = end;
+    tx = obj ? find_bounded(obj, oend, "\"simpleText\":\"") : NULL;
+    if (tx) {
+      char tmp[64];
+      copy_json_str(tx + 13, tmp, (int)sizeof tmp);
+      if (clock_seconds(tmp) >= 0) t->seconds = clock_seconds(tmp);
+    }
+  }
+}
+
+static int good_browse(const char *id) {
+  if (!id || strlen(id) < 2 || strlen(id) >= YTM_BROWSE_LEN) return 0;
+  if (strncmp(id, "VL", 2) == 0 || strncmp(id, "MP", 2) == 0 || strncmp(id, "FE", 2) == 0 ||
+      strncmp(id, "OL", 2) == 0)
+    return 1;
+  return 0;
+}
+
+static void parse_two(const char *s, const char *end, Track *t) {
+  const char *menu = find_bounded(s, end, "\"menu\":");
+  const char *lim = menu ? menu : end;
+  const char *title = find_bounded(s, lim, "\"title\":");
+  const char *sub = find_bounded(s, lim, "\"subtitle\":");
+  const char *bid = NULL;
+  const char *p = s;
+  char url[300];
+  while ((p = find_bounded(p, lim, "\"browseId\":\"")) != NULL) {
+    char id[YTM_BROWSE_LEN];
+    copy_json_str(p + 12, id, (int)sizeof id);
+    p += 12;
+    if (good_browse(id)) {
+      snprintf(t->browse, sizeof t->browse, "%s", id);
+      bid = p;
+      break;
+    }
+  }
+  if (!t->browse[0]) return;
+  (void)bid;
+  if (title) {
+    const char *obj = strchr(title, '{');
+    const char *tend = obj ? json_end(obj) : lim;
+    if (tend > lim) tend = lim;
+    if (obj) runs_into(obj, tend, t, 1);
+  }
+  if (sub) {
+    const char *obj = strchr(sub, '{');
+    const char *send = obj ? json_end(obj) : lim;
+    if (send > lim) send = lim;
+    if (obj) runs_into(obj, send, t, 0);
+  }
+  url[0] = 0;
+  p = find_bounded(s, lim, "\"url\":\"");
+  if (p) copy_json_str(p + 7, url, (int)sizeof url);
+  store_thumb(t, url);
+}
+
+static int collect_api(const char *json, Track *out, int max) {
+  const char *p = json;
+  int count = 0;
+  while (count < max && (p = strstr(p, "\"contentDetails\"")) != NULL) {
+    const char *id = strstr(p, "\"videoId\":\"");
+    const char *base = (p - json > 1600) ? p - 1600 : json;
+    const char *title = NULL;
+    const char *artist = NULL;
+    const char *owner = NULL;
+    const char *q;
+    Track t;
+    if (!id || id > p + 400) {
+      p += 16;
+      continue;
+    }
+    memset(&t, 0, sizeof t);
+    if (!take_vid(id + 11, id + 40, t.id)) {
+      p = id + 11;
+      continue;
+    }
+    q = base;
+    while ((q = strstr(q, "\"title\":\"")) != NULL && q < p) {
+      title = q + 9;
+      q += 9;
+    }
+    q = base;
+    while ((q = strstr(q, "\"videoOwnerChannelTitle\":\"")) != NULL && q < p) {
+      owner = q + 26;
+      q += 26;
+    }
+    q = base;
+    while ((q = strstr(q, "\"channelTitle\":\"")) != NULL && q < p) {
+      artist = q + 16;
+      q += 16;
+    }
+    if (title) copy_json_str(title, t.title, (int)sizeof t.title);
+    if (owner) copy_json_str(owner, t.artist, (int)sizeof t.artist);
+    else if (artist) copy_json_str(artist, t.artist, (int)sizeof t.artist);
+    add_track(out, &count, max, &t);
+    p = id + 20;
+  }
+  return count;
+}
+
+static int collect_tracks(const char *json, Track *out, int max) {
+  int count = 0;
+  if (!json || max < 1) return 0;
+  walk_kind(json, "\"musicResponsiveListItemRenderer\":", out, &count, max, parse_mrlir);
+  walk_kind(json, "\"musicCardShelfRenderer\":", out, &count, max, parse_card);
+  if (count == 0) walk_kind(json, "\"tileRenderer\":", out, &count, max, parse_tile);
+  if (count == 0) walk_kind(json, "\"musicTwoRowItemRenderer\":", out, &count, max, parse_two);
+  if (count == 0) count = collect_api(json, out, max);
   return count;
 }
 
@@ -721,6 +1143,150 @@ int ytm_browse(const char *browse_id, Track *out, int max, char *err, int err_n)
   return remix_browse(browse_id, 0, out, max, err, err_n);
 }
 
+static int http_get_bin(const char *url, unsigned char *buf, int cap, int *status) {
+  int req, total = 0, n;
+  if (!buf || cap < 8 || g_tmpl < 0) return -1;
+  req = sceHttp2CreateRequestWithURL(g_tmpl, "GET", url, 0);
+  if (req < 0) return -1;
+  sceHttp2AddRequestHeader(req, "Accept", "image/jpeg,image/*;q=0.8", SCE_HTTP_HEADER_OVERWRITE);
+  sceHttp2AddRequestHeader(req, "User-Agent", "Mozilla/5.0", SCE_HTTP_HEADER_OVERWRITE);
+  if (sceHttp2SendRequest(req, "", 0) != 0) {
+    sceHttp2DeleteRequest(req);
+    return -1;
+  }
+  *status = 0;
+  sceHttp2GetStatusCode(req, status);
+  while (total + 1 < cap &&
+         (n = sceHttp2ReadData(req, buf + total, (size_t)(cap - total - 1))) > 0)
+    total += n;
+  sceHttp2DeleteRequest(req);
+  return total;
+}
+
+static int http_get_json(const char *url, int *status, char *err, int err_n) {
+  int req, total = 0, n;
+  if (!g_resp || g_tmpl < 0) {
+    snprintf(err, (size_t)err_n, "Network is not up");
+    return -1;
+  }
+  req = sceHttp2CreateRequestWithURL(g_tmpl, "GET", url, 0);
+  if (req < 0) {
+    snprintf(err, (size_t)err_n, "HTTP create %d", req);
+    return -1;
+  }
+  sceHttp2AddRequestHeader(req, "Accept", "application/json", SCE_HTTP_HEADER_OVERWRITE);
+  if (g_access[0]) {
+    char auth[2100];
+    snprintf(auth, sizeof auth, "Bearer %s", g_access);
+    sceHttp2AddRequestHeader(req, "Authorization", auth, SCE_HTTP_HEADER_OVERWRITE);
+  }
+  if (sceHttp2SendRequest(req, "", 0) != 0) {
+    sceHttp2DeleteRequest(req);
+    snprintf(err, (size_t)err_n, "HTTP send failed");
+    return -1;
+  }
+  *status = 0;
+  sceHttp2GetStatusCode(req, status);
+  while (total + 1 < RESP_MAX &&
+         (n = sceHttp2ReadData(req, g_resp + total, (size_t)(RESP_MAX - total - 1))) > 0)
+    total += n;
+  g_resp[total] = 0;
+  sceHttp2DeleteRequest(req);
+  if (*status != 200) {
+    snprintf(err, (size_t)err_n, "YouTube HTTP %d", *status);
+    return -1;
+  }
+  return total;
+}
+
+static const char *cover_key_of(const Track *t, char *tmp, int n) {
+  if (t->id[0]) snprintf(tmp, (size_t)n, "%s", t->id);
+  else if (t->browse[0]) snprintf(tmp, (size_t)n, "%s", t->browse);
+  else snprintf(tmp, (size_t)n, "%s", t->thumb);
+  return tmp;
+}
+
+static CoverSlot *cover_find(const char *key) {
+  int i;
+  for (i = 0; i < g_cover_n; i++) {
+    if (strcmp(g_cover[i].key, key) == 0) return &g_cover[i];
+  }
+  return NULL;
+}
+
+int ytm_cover_fetch(const Track *t) {
+  char key[80];
+  char url[YTM_THUMB_LEN];
+  const char *src;
+  CoverSlot *slot;
+  unsigned char *buf;
+  unsigned char *dst;
+  int status = 0;
+  int n;
+  if (!t) return -1;
+  if (t->thumb[0]) src = t->thumb;
+  else if (t->id[0]) {
+    snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", t->id);
+    src = url;
+  } else {
+    return -1;
+  }
+  cover_key_of(t, key, (int)sizeof key);
+  if (!key[0]) return -1;
+  slot = cover_find(key);
+  if (slot) return slot->px ? 0 : -1;
+  if (g_cover_n >= COVER_SLOTS) return -1;
+  buf = (unsigned char *)malloc(180 * 1024);
+  dst = (unsigned char *)malloc((size_t)COVER_SIDE * COVER_SIDE * 4u);
+  if (!buf || !dst) {
+    free(buf);
+    free(dst);
+    return -1;
+  }
+  n = http_get_bin(src, buf, 180 * 1024, &status);
+  slot = &g_cover[g_cover_n++];
+  snprintf(slot->key, sizeof slot->key, "%s", key);
+  slot->px = NULL;
+  if (n > 64 && status == 200 && art_jpeg_square(buf, n, dst, COVER_SIDE) == 0) slot->px = dst;
+  else free(dst);
+  free(buf);
+  return slot->px ? 0 : -1;
+}
+
+const unsigned char *ytm_cover_pixels(const Track *t, int *w, int *h) {
+  char key[80];
+  CoverSlot *slot;
+  if (!t) return NULL;
+  cover_key_of(t, key, (int)sizeof key);
+  slot = cover_find(key);
+  if (!slot || !slot->px) return NULL;
+  if (w) *w = COVER_SIDE;
+  if (h) *h = COVER_SIDE;
+  return slot->px;
+}
+
+static int data_playlist(const char *pl, Track *out, int max, char *err, int err_n) {
+  char url[420];
+  int status = 0;
+  int n;
+  int ask = max > 40 ? 40 : max;
+  if (ask < 1) ask = 1;
+  snprintf(url, sizeof url,
+           "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails"
+           "&maxResults=%d&playlistId=%s",
+           ask, pl);
+  if (http_get_json(url, &status, err, err_n) < 0) {
+    snprintf(url, sizeof url,
+             "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails"
+             "&maxResults=%d&playlistId=%s&key=%s",
+             ask, pl, INNERTUBE_KEY);
+    if (http_get_json(url, &status, err, err_n) < 0) return -1;
+  }
+  n = collect_api(g_resp, out, max);
+  if (n == 0) snprintf(err, (size_t)err_n, "No songs in that library");
+  return n;
+}
+
 static int browse_tracks(const char *host, const char *browse_id, Track *out, int max, char *err,
                          int err_n) {
   char body[512];
@@ -744,10 +1310,140 @@ static int browse_tracks(const char *host, const char *browse_id, Track *out, in
 int ytm_liked(Track *out, int max, char *err, int err_n) {
   int n;
   if (ensure_access(err, err_n) != 0) return -1;
-  n = remix_browse("FEmusic_liked_videos", 1, out, max, err, err_n);
+  /* The device token is a YouTube Data API token. Liked music is playlist LM. */
+  n = data_playlist("LM", out, max, err, err_n);
   if (n > 0) return n;
-  n = browse_tracks("music.youtube.com", "FEmusic_liked_videos", out, max, err, err_n);
+  n = data_playlist("LL", out, max, err, err_n);
   if (n > 0) return n;
   n = browse_tracks("www.youtube.com", "VLLM", out, max, err, err_n);
+  if (n > 0) return n;
+  n = browse_tracks("music.youtube.com", "VLLM", out, max, err, err_n);
+  if (n > 0) return n;
+  n = browse_tracks("www.youtube.com", "FEmusic_liked_videos", out, max, err, err_n);
+  if (n > 0) return n;
+  n = remix_browse("VLLM", 1, out, max, err, err_n);
+  if (n > 0) return n;
+  n = remix_browse("FEmusic_liked_videos", 1, out, max, err, err_n);
+  if (n == 0) {
+    if (g_resp && (strstr(g_resp, "logged_in\",\"value\":\"0\"") ||
+                   strstr(g_resp, "Sign in to listen")))
+      snprintf(err, (size_t)err_n, "Sign-in was not accepted for the library");
+    else if (!err[0])
+      snprintf(err, (size_t)err_n, "No liked songs on this account");
+  }
   return n;
 }
+
+#ifdef YTM_PARSE_TEST
+int sceNetInit(void) { return 0; }
+int sceNetPoolCreate(const char *a, int b, int c) {
+  (void)a;
+  (void)b;
+  (void)c;
+  return 0;
+}
+int sceNetPoolDestroy(int a) {
+  (void)a;
+  return 0;
+}
+int sceSslInit(size_t a) {
+  (void)a;
+  return 0;
+}
+int sceSslTerm(int a) {
+  (void)a;
+  return 0;
+}
+int sceHttp2Init(int a, int b, size_t c, int d) {
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)d;
+  return 0;
+}
+int sceHttp2Term(int a) {
+  (void)a;
+  return 0;
+}
+int sceHttp2CreateTemplate(int a, const char *b, int c, int d) {
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)d;
+  return 0;
+}
+int sceHttp2DeleteTemplate(int a) {
+  (void)a;
+  return 0;
+}
+int sceHttp2CreateRequestWithURL(int a, const char *b, const char *c, unsigned long long d) {
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)d;
+  return 0;
+}
+int sceHttp2DeleteRequest(int a) {
+  (void)a;
+  return 0;
+}
+int sceHttp2AddRequestHeader(int a, const char *b, const char *c, unsigned int d) {
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)d;
+  return 0;
+}
+int sceHttp2SendRequest(int a, const void *b, size_t c) {
+  (void)a;
+  (void)b;
+  (void)c;
+  return 0;
+}
+int sceHttp2GetStatusCode(int a, int *b) {
+  (void)a;
+  if (b) *b = 0;
+  return 0;
+}
+int sceHttp2ReadData(int a, void *b, size_t c) {
+  (void)a;
+  (void)b;
+  (void)c;
+  return 0;
+}
+int art_jpeg_square(const unsigned char *a, int b, unsigned char *c, int d) {
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)d;
+  return -1;
+}
+int main(int argc, char **argv) {
+  FILE *f;
+  char *buf;
+  long sz;
+  Track out[40];
+  int c, i;
+  if (argc < 2) return 1;
+  f = fopen(argv[1], "rb");
+  if (!f) return 1;
+  fseek(f, 0, SEEK_END);
+  sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  buf = (char *)malloc((size_t)sz + 1);
+  if (!buf) return 1;
+  if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) return 1;
+  buf[sz] = 0;
+  fclose(f);
+  if (strstr(buf, "\"contentDetails\"")) c = collect_api(buf, out, 40);
+  else c = collect_tracks(buf, out, 40);
+  printf("count %d\n", c);
+  for (i = 0; i < c && i < 8; i++) {
+    printf("[%d] id=%s browse=%s\n  title=%s\n  artist=%s\n  album=%s\n  sec=%d thumb=%s\n", i,
+           out[i].id, out[i].browse, out[i].title, out[i].artist, out[i].album, out[i].seconds,
+           out[i].thumb);
+  }
+  free(buf);
+  return c > 0 ? 0 : 2;
+}
+#endif

@@ -347,6 +347,37 @@ static void open_account(void) {
   start_code();
 }
 
+static int g_art_budget;
+
+static void play_or_open(Track *list, int n, int idx) {
+  char browse[YTM_BROWSE_LEN];
+  char err[192];
+  int c;
+  if (!list || idx < 0 || idx >= n) return;
+  if (list[idx].id[0]) {
+    play_list(list, n, idx);
+    return;
+  }
+  if (!list[idx].browse[0]) return;
+  snprintf(browse, sizeof browse, "%s", list[idx].browse);
+  snprintf(g_list_title, sizeof g_list_title, "%s", list[idx].title);
+  set_status("Opening...");
+  paint();
+  c = ytm_browse(browse, g_results, YTM_TRACK_CAP, err, (int)sizeof err);
+  if (c < 0) {
+    set_status(err[0] ? err : "Could not open that");
+    toast(g_status);
+    return;
+  }
+  g_nresults = c;
+  g_sel = 0;
+  g_scroll = 0;
+  g_body = BODY_LIST;
+  g_zone = ZONE_BODY;
+  if (c > 0) play_list(g_results, g_nresults, 0);
+  else set_status(err[0] ? err : "Nothing in that shelf");
+}
+
 static void on_activate(void) {
   if (g_player_ui) {
     player_toggle();
@@ -379,18 +410,17 @@ static void on_activate(void) {
   } else if (g_body == BODY_EXPLORE) {
     open_shelf(g_explore);
   } else if (g_body == BODY_LIST) {
-    play_list(g_results, g_nresults, g_sel);
+    play_or_open(g_results, g_nresults, g_sel);
   } else if (g_body == BODY_LIBRARY) {
     if (!ytm_signed_in()) open_account();
-    else if (g_nlikes > 0) play_list(g_likes, g_nlikes, g_sel);
+    else if (g_nlikes > 0) play_or_open(g_likes, g_nlikes, g_sel);
     else open_library();
   } else if (g_body == BODY_ACCOUNT) {
     if (!ytm_signed_in()) {
       start_code();
       return;
     }
-    if (g_acct_sel == 0) open_library();
-    else {
+    if (g_acct_sel == 0) {
       ytm_auth_signout();
       remove("/data/ytmusic/auth.txt");
       g_auth_wait = 0;
@@ -464,7 +494,7 @@ static void on_move(int dx, int dy) {
     }
     return;
   }
-  if (dx < 0 && g_body != BODY_SEARCH) {
+  if (dx < 0 && g_body != BODY_SEARCH && g_body != BODY_HOME) {
     g_zone = ZONE_NAV;
     return;
   }
@@ -509,11 +539,7 @@ static void on_move(int dx, int dy) {
       g_zone = ZONE_NAV;
       return;
     }
-    if (ytm_signed_in() && dy) {
-      g_acct_sel += dy;
-      if (g_acct_sel < 0) g_acct_sel = 0;
-      if (g_acct_sel > 1) g_acct_sel = 1;
-    }
+    if (ytm_signed_in() && dy) g_acct_sel = 0;
     return;
   }
   g_sel += dy;
@@ -546,16 +572,48 @@ static void draw_disc(Draw *d, int cx, int cy, int rad, int r, int g, int b) {
   }
 }
 
+static void stroke(Draw *d, int x0, int y0, int x1, int y1, int thick, int r, int g, int b) {
+  int dx = x1 - x0;
+  int dy = y1 - y0;
+  int steps = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
+  int i;
+  if (steps < 1) steps = 1;
+  if (thick < 1) thick = 1;
+  for (i = 0; i <= steps; i++) {
+    int x = x0 + dx * i / steps;
+    int y = y0 + dy * i / steps;
+    fill_v(d, x - thick / 2, y - thick / 2, thick, thick, r, g, b);
+  }
+}
+
+static void arrow_head(Draw *d, int x, int y, int dir, int r, int g, int b) {
+  int i;
+  for (i = 0; i < 6; i++) {
+    if (dir > 0) fill_v(d, x - i, y - i, 2, i * 2 + 1, r, g, b);
+    else fill_v(d, x + i, y - i, 2, i * 2 + 1, r, g, b);
+  }
+}
+
 static void draw_repeat_icon(Draw *d, int cx, int cy, int mode, int hr, int hg, int hb) {
-  int on = mode != REP_OFF;
-  int rad = 22;
-  draw_disc(d, cx, cy, rad, on ? 212 : 110, on ? 166 : 112, on ? 86 : 120);
-  draw_disc(d, cx, cy, 14, hr, hg, hb);
+  (void)hr;
+  (void)hg;
+  (void)hb;
+  /* Dark disc with two original loop arrows. Not a copy of any icon font. */
+  draw_disc(d, cx, cy, 22, 12, 13, 16);
+  stroke(d, cx - 8, cy - 7, cx + 6, cy - 7, 3, 244, 242, 236);
+  stroke(d, cx + 6, cy - 7, cx + 10, cy - 1, 3, 244, 242, 236);
+  arrow_head(d, cx + 7, cy - 7, 1, 244, 242, 236);
+  stroke(d, cx + 8, cy + 7, cx - 6, cy + 7, 3, 244, 242, 236);
+  stroke(d, cx - 6, cy + 7, cx - 10, cy + 1, 3, 244, 242, 236);
+  arrow_head(d, cx - 7, cy + 7, -1, 244, 242, 236);
+  stroke(d, cx - 10, cy + 1, cx - 10, cy - 4, 3, 244, 242, 236);
+  stroke(d, cx + 10, cy - 1, cx + 10, cy + 4, 3, 244, 242, 236);
   if (mode == REP_ONE) {
-    int tw = text_px("1", 1);
-    draw_text(d, cx - tw / 2, cy - 16, 1, 244, 242, 236, "1");
+    stroke(d, cx + 1, cy - 3, cx + 1, cy + 4, 3, 244, 242, 236);
+    stroke(d, cx - 2, cy - 1, cx + 1, cy - 3, 2, 244, 242, 236);
+    stroke(d, cx - 2, cy + 4, cx + 4, cy + 4, 2, 244, 242, 236);
   } else if (mode == REP_OFF) {
-    for (int i = -16; i <= 16; i++) fill_v(d, cx + i, cy - i, 2, 2, 168, 170, 178);
+    stroke(d, cx - 12, cy - 12, cx + 12, cy + 12, 3, 244, 242, 236);
   }
 }
 
@@ -588,6 +646,20 @@ static void draw_cover(Draw *d, int x, int y, int size, const char *label, int r
   draw_text(d, x + (size - tw) / 2, y + size / 2 - 18, 1, 255, 248, 236, letter);
 }
 
+static void draw_track_art(Draw *d, int x, int y, int size, const Track *t) {
+  int w = 0, h = 0;
+  const unsigned char *px;
+  if (!t) return;
+  px = ytm_cover_pixels(t, &w, &h);
+  if (!px && g_art_budget > 0 && (t->id[0] || t->thumb[0])) {
+    g_art_budget--;
+    ytm_cover_fetch(t);
+    px = ytm_cover_pixels(t, &w, &h);
+  }
+  if (px && w > 0 && h > 0) blit_cover(d, x, y, size, px, w, h);
+  else draw_cover(d, x, y, size, t->title[0] ? t->title : "M", 0);
+}
+
 static void present(Draw *d) {
   static int told;
   draw_end(d);
@@ -605,7 +677,7 @@ static void draw_hints(Draw *d) {
     s = "X Pause   O Back   D-pad Seek / Volume   L1 R1 Skip   Touchpad Repeat";
   } else if (g_body == BODY_ACCOUNT) {
     s = ytm_signed_in()
-            ? "X Open   O Back   D-pad Move   Options Search   Touchpad Repeat"
+            ? "X Sign out   O Back   Options Search   Touchpad Repeat"
             : "X New code   O Back   Options Search";
   } else if (g_body == BODY_SEARCH) {
     s = "X Type   O Back   D-pad Move   Triangle Player   Touchpad Repeat";
@@ -629,6 +701,11 @@ static void paint(void) {
   SDL_Surface *surf = SDL_GetWindowSurface(g_win);
   const Track *now = (g_qindex >= 0 && g_qindex < g_nqueue) ? &g_queue[g_qindex] : NULL;
   if (!surf) return;
+  g_art_budget = 1;
+  if (now && (now->id[0] || now->thumb[0]) && !ytm_cover_pixels(now, NULL, NULL)) {
+    ytm_cover_fetch(now);
+    g_art_budget = 0;
+  }
   draw_begin(&d, surf);
   fill_v(&d, 0, 0, 1920, 1080, 12, 13, 16);
 
@@ -641,9 +718,9 @@ static void paint(void) {
     fill_v(&d, 0, 0, 1920, 1080, 8, 9, 12);
     fill_round(&d, 28, 24, 1864, HINT_Y - 48, 36, 212, 166, 86);
     fill_round(&d, 36, 32, 1848, HINT_Y - 64, 32, 8, 9, 12);
-    fill_round(&d, 56, 48, 380, 44, 22, 212, 166, 86);
-    draw_text(&d, 76, 54, 1, 24, 18, 8, "Controlling the player");
-    draw_cover(&d, 780, 96, 360, now->title, 0);
+    fill_round(&d, 56, 48, text_px("Now Playing", 1) + 40, 44, 22, 212, 166, 86);
+    draw_text(&d, 76, 54, 1, 24, 18, 8, "Now Playing");
+    draw_track_art(&d, 780, 96, 360, now);
     fit(line, (int)sizeof line, now->title, 2, 1500);
     draw_text(&d, (1920 - text_px(line, 2)) / 2, 500, 2, 244, 242, 236, line);
     fit(line, (int)sizeof line, now->artist, 1, 1200);
@@ -732,7 +809,6 @@ static void paint(void) {
       fill_round(&d, x, y, 360, 200, 24, 24, 26, 34);
       fill_round(&d, x + 24, y + 36, 72, 8, 4, cr, cg, cb);
       draw_text(&d, x + 24, y + 64, 2, 244, 242, 236, moods[i][0]);
-      draw_text(&d, x + 24, y + 140, 1, 150, 152, 164, "X plays");
     }
   } else if (g_body == BODY_EXPLORE) {
     draw_text(&d, RAIL + 28, 24, 2, 244, 242, 236, "Explore");
@@ -797,13 +873,13 @@ static void paint(void) {
       }
       draw_text(&d, RAIL + 28, 450, 1, 150, 152, 164, "X asks for a new code if this one expires");
     } else {
-      const char *rows[] = {"Liked songs", "Sign out"};
+      const char *rows[] = {"Sign out"};
       draw_text(&d, RAIL + 28, 120, 1, 168, 170, 180, "YouTube Music is linked to this console");
-      for (int i = 0; i < 2; i++) {
-        int y = 200 + i * 100;
-        int sel = (g_zone == ZONE_BODY && g_acct_sel == i);
+      {
+        int y = 200;
+        int sel = (g_zone == ZONE_BODY);
         if (sel) fill_round(&d, RAIL + 16, y, 900, 80, 24, 42, 36, 28);
-        draw_text(&d, RAIL + 40, y + 22, 1, 244, 242, 236, rows[i]);
+        draw_text(&d, RAIL + 40, y + 22, 1, 244, 242, 236, rows[0]);
       }
     }
   } else {
@@ -828,7 +904,7 @@ static void paint(void) {
       int sel = (g_zone == ZONE_BODY && g_sel == idx);
       char time[16];
       if (sel) fill_round(&d, RAIL + 16, y - 8, 1588, 108, 24, 32, 34, 44);
-      draw_cover(&d, RAIL + 36, y, 84, list[idx].title, 0);
+      draw_track_art(&d, RAIL + 36, y, 84, &list[idx]);
       fit(line, (int)sizeof line, list[idx].title, 1, 1100);
       draw_text(&d, RAIL + 140, y + 8, 1, 244, 242, 236, line);
       fit(line, (int)sizeof line, list[idx].artist, 1, 900);
@@ -849,7 +925,7 @@ static void paint(void) {
     int bar_x = 700;
     int bar_w = 720;
     if (dur < 1) dur = now->seconds;
-    draw_cover(&d, 36, BAR_Y + 18, 72, now->title, 0);
+    draw_track_art(&d, 36, BAR_Y + 18, 72, now);
     fit(line, (int)sizeof line, now->title, 1, 400);
     draw_text(&d, 124, BAR_Y + 20, 1, 244, 242, 236, line);
     fit(line, (int)sizeof line, sub, 1, 400);
@@ -1014,7 +1090,7 @@ int main(int argc, char **argv) {
       set_status(err);
       toast(err);
     } else if (!g_status[0]) {
-      set_status("Pick a shelf. X plays it.");
+      set_status("Pick a shelf.");
     }
     if (net_ok) auth_load();
   }

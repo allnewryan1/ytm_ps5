@@ -4,6 +4,11 @@
 
 - First payload: YouTube Music search, shelves, and playback.
 - Explore lists New releases, Charts, and Trending from YouTube Music. Options still opens the search keyboard.
+- Song, artist, album, and playlist names are read from the catalog objects, including accented characters.
+- Covers are downloaded for the playing song and the rows on screen.
+- Home left and right stay on the shelf until the left edge, which returns to the menu.
+- Library loads liked songs from the signed-in account. Account no longer has a separate Liked songs row.
+- The player label says Now Playing. Repeat is a loop icon for all, one, and off.
 - Library loads liked songs for the signed-in account. The console no longer stores them in a text file.
 - The now-playing bar shows the song and album on the left, the seek bar in the center, and a repeat icon on the right. Album text is taken from the catalog and falls back to the artist. Volume is a slider on the player screen.
 - Home shelves are short tiles. The player outline still marks when the pad is controlling playback.
