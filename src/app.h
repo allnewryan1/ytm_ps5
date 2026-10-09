@@ -9,6 +9,7 @@ typedef struct Track {
   char id[YTM_ID_LEN];
   char title[YTM_TITLE_LEN];
   char artist[YTM_TITLE_LEN];
+  char album[YTM_TITLE_LEN];
   int seconds;
 } Track;
 

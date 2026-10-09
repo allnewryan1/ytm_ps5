@@ -2,7 +2,11 @@
 
 ## 0.1.0
 
-- First payload: YouTube Music search, shelves, playback, and a library file on the console.
+- First payload: YouTube Music search, shelves, and playback.
+- Explore lists New releases, Charts, and Trending from YouTube Music. Options still opens the search keyboard.
+- Library loads liked songs for the signed-in account. The console no longer stores them in a text file.
+- The now-playing bar shows the song and album on the left, the seek bar in the center, and a repeat icon on the right. Album text is taken from the catalog and falls back to the artist. Volume is a slider on the player screen.
+- Home shelves are short tiles. The player outline still marks when the pad is controlling playback.
 - SDL2 picture, FFmpeg audio, sceHttp2 for Innertube.
 - ShadowMountPlus folder: `eboot.bin`, `sce_module/libc.prx`, and `sce_sys/`.
 - Home-screen `eboot.bin` is a native PS5 module, not the elfldr payload.

@@ -138,7 +138,8 @@ static int junk_label(const char *s) {
   static const char *bad[] = {
       "SONG", "Song", "Songs", "ALBUM", "Album", "ARTIST", "Artist",
       "Explicit", "MUSIC", "Music", "Watch", "Shuffle", "Play", "plays",
-      "views", "VIDEO", "Episode", "Sign in", NULL};
+      "views", "VIDEO", "Episode", "Sign in", "Play next", "Start mix",
+      "Like this song", "Save this for later", "Music videos", NULL};
   if (!s || !s[0]) return 1;
   for (int i = 0; bad[i]; i++) {
     if (strcmp(s, bad[i]) == 0) return 1;
@@ -312,11 +313,16 @@ static int collect_tracks(const char *json, Track *out, int max) {
     memset(&out[count], 0, sizeof out[count]);
     memcpy(out[count].id, id, sizeof out[count].id);
     out[count].seconds = 0;
+    out[count].album[0] = 0;
     if (nlab >= 2 && clock_seconds(labels[nlab - 1]) >= 0) {
       out[count].seconds = clock_seconds(labels[nlab - 1]);
       nlab--;
     }
-    if (nlab >= 2) {
+    if (nlab >= 3) {
+      snprintf(out[count].title, sizeof out[count].title, "%s", labels[nlab - 3]);
+      snprintf(out[count].artist, sizeof out[count].artist, "%s", labels[nlab - 2]);
+      snprintf(out[count].album, sizeof out[count].album, "%s", labels[nlab - 1]);
+    } else if (nlab >= 2) {
       snprintf(out[count].title, sizeof out[count].title, "%s", labels[nlab - 2]);
       snprintf(out[count].artist, sizeof out[count].artist, "%s", labels[nlab - 1]);
     } else if (nlab == 1) {
@@ -690,6 +696,31 @@ static int ensure_access(char *err, int err_n) {
   return ytm_auth_refresh(err, err_n);
 }
 
+static int remix_browse(const char *browse_id, int authed, Track *out, int max, char *err,
+                         int err_n) {
+  char body[640];
+  char url[256];
+  int status = 0;
+  int n;
+  snprintf(url, sizeof url,
+           "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+           "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "\"browseId\":\"%s\"}",
+           browse_id);
+  if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
+                   NULL, NULL, authed, 0, &status, err, err_n) < 0)
+    return -1;
+  n = collect_tracks(g_resp, out, max);
+  if (n == 0) snprintf(err, (size_t)err_n, "Nothing in that shelf");
+  return n;
+}
+
+int ytm_browse(const char *browse_id, Track *out, int max, char *err, int err_n) {
+  return remix_browse(browse_id, 0, out, max, err, err_n);
+}
+
 static int browse_tracks(const char *host, const char *browse_id, Track *out, int max, char *err,
                          int err_n) {
   char body[512];
@@ -713,6 +744,8 @@ static int browse_tracks(const char *host, const char *browse_id, Track *out, in
 int ytm_liked(Track *out, int max, char *err, int err_n) {
   int n;
   if (ensure_access(err, err_n) != 0) return -1;
+  n = remix_browse("FEmusic_liked_videos", 1, out, max, err, err_n);
+  if (n > 0) return n;
   n = browse_tracks("music.youtube.com", "FEmusic_liked_videos", out, max, err, err_n);
   if (n > 0) return n;
   n = browse_tracks("www.youtube.com", "VLLM", out, max, err, err_n);

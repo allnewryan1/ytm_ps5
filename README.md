@@ -1,6 +1,6 @@
 # YouTube Music for PS5
 
-Native userland payload for a jailbroken PS5 on system software 13.60. It is a DualSense client for searching, browsing shelves, playing songs, seeking, and keeping a library on the console. It is not a website, and it does not include a jailbreak.
+Native userland payload for a jailbroken PS5 on system software 13.60. It is a DualSense client for searching, browsing shelves, playing songs, and opening the liked songs on a signed-in account. It is not a website, and it does not include a jailbreak.
 
 The build uses the [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk): `prospero.mk`, an ELF, and `PS5_DEPLOY` to an ELF loader on port **9021**. Video is SDL2 on sceVideoOut. Audio is FFmpeg into sceAudioOut. HTTPS calls to YouTube use sceHttp2, the same calls as the SDK `http2_get` sample.
 
@@ -51,10 +51,9 @@ The install folder stays `PPSA99105`. The home screen title is YouTube Music. `e
 | D-pad / left stick | Move |
 | Cross | Open, play, or pause |
 | Circle | Back |
-| Square | Save or remove the song in `/data/ytmusic/liked.txt` |
 | Triangle | Now playing |
 | Options | Search |
-| Create | Cycle repeat: off, all, one |
+| Touchpad | Cycle repeat: off, all, one |
 | L1 / R1 | Previous / next |
 | Left / right on the player | Seek 10 seconds |
 | Up / down on the player | Volume |

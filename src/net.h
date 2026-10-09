@@ -9,6 +9,9 @@ void net_shutdown(void);
 /* Fills out[] with up to max tracks. Returns the count, or -1 on transport error. */
 int ytm_search(const char *query, Track *out, int max, char *err, int err_n);
 
+/* Public Music shelf, such as new releases or a chart playlist. */
+int ytm_browse(const char *browse_id, Track *out, int max, char *err, int err_n);
+
 /* Writes a direct googlevideo audio URL. duration may be 0 if unknown. */
 int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration,
                   char *err, int err_n);
