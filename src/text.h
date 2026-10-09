@@ -16,6 +16,7 @@ typedef struct Draw {
 void draw_begin(Draw *d, SDL_Surface *surf);
 void draw_end(Draw *d);
 void fill_v(Draw *d, int x, int y, int w, int h, int r, int g, int b);
+void fill_round(Draw *d, int x, int y, int w, int h, int rad, int r, int g, int b);
 void draw_text(Draw *d, int x, int y, int scale, int r, int g, int b, const char *s);
 int text_px(const char *s, int scale);
 

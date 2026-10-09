@@ -1,4 +1,5 @@
 #include "player.h"
+#include "net.h"
 
 #include <SDL.h>
 
@@ -86,11 +87,8 @@ static void *decode_main(void *arg) {
   fmt->interrupt_callback.callback = interrupt_cb;
   fmt->interrupt_callback.opaque = NULL;
 
-  av_dict_set(&opts, "user_agent",
-              "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 "
-              "(KHTML, like Gecko) Version/26.0 Safari/605.1.15",
-              0);
-  av_dict_set(&opts, "referer", "https://www.youtube.com/", 0);
+  av_dict_set(&opts, "user_agent", ytm_stream_ua(), 0);
+  av_dict_set(&opts, "referer", ytm_stream_referer(), 0);
   av_dict_set(&opts, "reconnect", "1", 0);
   av_dict_set(&opts, "reconnect_streamed", "1", 0);
   av_dict_set(&opts, "rw_timeout", "15000000", 0);

@@ -115,6 +115,65 @@ void fill_v(Draw *d, int x, int y, int w, int h, int r, int g, int b) {
   }
 }
 
+static int round_inset(int dist, int rad) {
+  int dy, lo, hi;
+  if (dist >= rad) return 0;
+  dy = rad - dist;
+  lo = 0;
+  hi = rad;
+  while (lo < hi) {
+    int mid = (lo + hi + 1) / 2;
+    if (mid * mid + dy * dy <= rad * rad) lo = mid;
+    else hi = mid - 1;
+  }
+  return rad - lo;
+}
+
+void fill_round(Draw *d, int x, int y, int w, int h, int rad, int r, int g, int b) {
+  int x0, y0, pw, ph, prad;
+  Uint32 np;
+  if (rad < 1) {
+    fill_v(d, x, y, w, h, r, g, b);
+    return;
+  }
+  if (!d->surf || w < 1 || h < 1) return;
+  x0 = d->ox + (int)(x * d->s);
+  y0 = d->oy + (int)(y * d->s);
+  pw = (int)(w * d->s);
+  ph = (int)(h * d->s);
+  if (pw < 1) pw = 1;
+  if (ph < 1) ph = 1;
+  prad = (int)(rad * d->s);
+  if (prad < 1) prad = 1;
+  if (prad > pw / 2) prad = pw / 2;
+  if (prad > ph / 2) prad = ph / 2;
+  if (d->bpp != 4 || !d->surf->pixels) {
+    fill_v(d, x, y, w, h, r, g, b);
+    return;
+  }
+  np = ((unsigned)r << d->rshift) | ((unsigned)g << d->gshift) | ((unsigned)b << d->bshift);
+  if (d->amask) np |= d->amask;
+  for (int row = 0; row < ph; row++) {
+    int inset = 0;
+    int sx, sw;
+    if (row < prad) inset = round_inset(row, prad);
+    else if (row >= ph - prad) inset = round_inset(ph - 1 - row, prad);
+    sx = x0 + inset;
+    sw = pw - inset * 2;
+    if (sw < 1) continue;
+    {
+      int sy = y0 + row;
+      int clip_x = sx, clip_y = sy, clip_w = sw, clip_h = 1;
+      clip_rect(d, &clip_x, &clip_y, &clip_w, &clip_h);
+      if (clip_h < 1 || clip_w < 1) continue;
+      {
+        Uint8 *p = (Uint8 *)d->surf->pixels + clip_y * d->surf->pitch + clip_x * 4;
+        for (int col = 0; col < clip_w; col++) ((Uint32 *)p)[col] = np;
+      }
+    }
+  }
+}
+
 int text_px(const char *s, int scale) {
   int w = 0;
   if (!s || scale < 1) return 0;

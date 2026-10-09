@@ -18,3 +18,5 @@
 - Account sign-in uses YouTube's TV device code. Open google.com/device, enter the code, and liked songs load for that account. The sign-in is stored on the console.
 - Options opens search. The touchpad cycles repeat.
 - While the player has focus, a gold outline and a "Controlling the player" label show that playback is what the pad is driving. The side rail names the current section.
+- Playback sends a YouTube visitor id with the stream request. Without it, YouTube answers "sign in" even after the account code is accepted. A signed-in console also tries the TV player with that token.
+- Shelves, rows, search, and the player use rounded corners.

@@ -203,6 +203,7 @@ void net_shutdown(void) {
 static char g_access[2048];
 static char g_refresh[1024];
 static char g_device_code[256];
+static char g_visitor[128];
 static time_t g_access_exp;
 
 static int http_post_ex(const char *url, const char *body, const char *ua, const char *origin,
@@ -231,6 +232,8 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
     sceHttp2AddRequestHeader(req, "X-YouTube-Client-Name", client_name, SCE_HTTP_HEADER_OVERWRITE);
   if (client_ver)
     sceHttp2AddRequestHeader(req, "X-YouTube-Client-Version", client_ver, SCE_HTTP_HEADER_OVERWRITE);
+  if (g_visitor[0])
+    sceHttp2AddRequestHeader(req, "X-Goog-Visitor-Id", g_visitor, SCE_HTTP_HEADER_OVERWRITE);
   if (authed && g_access[0]) {
     char auth[2100];
     snprintf(auth, sizeof auth, "Bearer %s", g_access);
@@ -399,31 +402,82 @@ static int pick_audio_url(const char *json, char *url, int url_n) {
   return best >= 0;
 }
 
-int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration,
-                  char *err, int err_n) {
-  /* visionOS Innertube still returns a direct AAC URL without a proof-of-origin
-   * token. Android and iOS clients now answer with a cipher or a sign-in wall. */
-  static const char *ua =
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 "
-      "(KHTML, like Gecko) Version/26.0 Safari/605.1.15";
-  char body[1024];
-  char endpoint[320];
+static char g_stream_ua[180];
+static char g_stream_ref[96];
+
+static int ensure_access(char *err, int err_n);
+
+/* Anonymous player calls are rejected as a bot until this id is sent back. */
+static int ensure_visitor(void) {
+  char err[80];
+  char body[192];
+  int status = 0;
+  int n;
+  if (g_visitor[0]) return 0;
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"WEB\","
+           "\"clientVersion\":\"2.20251009.00.00\",\"hl\":\"en\",\"gl\":\"US\"}}}");
+  n = http_post_ex("https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false", body,
+                   "Mozilla/5.0", "https://www.youtube.com", "https://www.youtube.com/", "1",
+                   "2.20251009.00.00", 0, 1, &status, err, (int)sizeof err);
+  if (n < 2 || status != 200 ||
+      !json_string(g_resp, "visitorData", g_visitor, (int)sizeof g_visitor) ||
+      strchr(g_visitor, '"') || strchr(g_visitor, '\\')) {
+    g_visitor[0] = 0;
+    return -1;
+  }
+  return 0;
+}
+
+static void remember_stream(const char *ua, const char *ref) {
+  snprintf(g_stream_ua, sizeof g_stream_ua, "%s", ua ? ua : "");
+  snprintf(g_stream_ref, sizeof g_stream_ref, "%s", ref ? ref : "");
+}
+
+const char *ytm_stream_ua(void) {
+  return g_stream_ua[0] ? g_stream_ua
+                        : "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 "
+                          "(KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+}
+
+const char *ytm_stream_referer(void) {
+  return g_stream_ref[0] ? g_stream_ref : "https://www.youtube.com/";
+}
+
+static void player_fail(char *err, int err_n) {
+  char reason[160];
+  if (strstr(g_resp, "signatureCipher") || strstr(g_resp, "\"signature\":\""))
+    snprintf(err, (size_t)err_n, "YouTube signed this stream; no direct audio URL");
+  else if (strstr(g_resp, "LOGIN_REQUIRED"))
+    snprintf(err, (size_t)err_n, "YouTube asked this console to sign in");
+  else if (json_string(g_resp, "reason", reason, (int)sizeof reason))
+    snprintf(err, (size_t)err_n, "%s", reason);
+  else
+    snprintf(err, (size_t)err_n, "No audio URL in the player response");
+}
+
+static int player_call(const char *video_id, const char *host, const char *client,
+                       const char *ver, const char *ua, const char *referer, const char *cname,
+                       const char *extra, int authed, char *url, int url_n, int *duration,
+                       char *err, int err_n) {
+  char body[1536];
+  char endpoint[240];
+  char vis[160];
   int status = 0;
   int len = 0;
-  *duration = 0;
-  url[0] = 0;
-  snprintf(endpoint, sizeof endpoint,
-           "https://www.youtube.com/youtubei/v1/player?prettyPrint=false");
+  int n;
+  vis[0] = 0;
+  if (g_visitor[0]) snprintf(vis, sizeof vis, ",\"visitorData\":\"%s\"", g_visitor);
+  snprintf(endpoint, sizeof endpoint, "https://%s/youtubei/v1/player?prettyPrint=false", host);
   snprintf(body, sizeof body,
-           "{\"context\":{\"client\":{\"clientName\":\"VISIONOS\","
-           "\"clientVersion\":\"1.02\",\"deviceMake\":\"Apple\","
-           "\"deviceModel\":\"RealityDevice17,1\",\"osName\":\"visionOS\","
-           "\"osVersion\":\"26.5.23O471\",\"hl\":\"en\",\"gl\":\"US\","
-           "\"userAgent\":\"%s\"}},\"videoId\":\"%s\","
+           "{\"context\":{\"client\":{\"clientName\":\"%s\",\"clientVersion\":\"%s\","
+           "\"hl\":\"en\",\"gl\":\"US\",\"userAgent\":\"%s\"%s%s}},\"videoId\":\"%s\","
            "\"contentCheckOk\":true,\"racyCheckOk\":true}",
-           ua, video_id);
-  if (http_post_ex(endpoint, body, ua, "https://www.youtube.com", "https://www.youtube.com/",
-                   "101", "1.02", 0, 0, &status, err, err_n) < 0) {
+           client, ver, ua, vis, extra ? extra : "", video_id);
+  n = http_post_ex(endpoint, body, ua, "https://www.youtube.com", referer, cname, ver, authed, 1,
+                   &status, err, err_n);
+  if (n < 2) {
+    if (err[0] == 0) snprintf(err, (size_t)err_n, "Player request failed");
     return -1;
   }
   json_int(g_resp, "lengthSeconds", &len);
@@ -433,20 +487,53 @@ int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration,
   }
   if (pick_audio_url(g_resp, url, url_n)) {
     *duration = len;
+    remember_stream(ua, referer);
     err[0] = 0;
     return 0;
   }
-  if (strstr(g_resp, "signatureCipher") || strstr(g_resp, "\"signature\":\"")) {
-    snprintf(err, (size_t)err_n, "YouTube signed this stream; no direct audio URL");
-  } else if (strstr(g_resp, "LOGIN_REQUIRED")) {
-    snprintf(err, (size_t)err_n, "YouTube asked this console to sign in");
-  } else {
-    char reason[160];
-    if (json_string(g_resp, "reason", reason, (int)sizeof reason))
-      snprintf(err, (size_t)err_n, "%s", reason);
-    else
-      snprintf(err, (size_t)err_n, "No audio URL in the player response");
+  player_fail(err, err_n);
+  return -1;
+}
+
+int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration, char *err,
+                  int err_n) {
+  static const char *vision_ua =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 "
+      "(KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+  static const char *vision_extra =
+      ",\"deviceMake\":\"Apple\",\"deviceModel\":\"RealityDevice17,1\","
+      "\"osName\":\"visionOS\",\"osVersion\":\"26.5.23O471\"";
+  char gate[192];
+  char kept[192];
+  int signed_in = 0;
+  int attempt;
+  *duration = 0;
+  url[0] = 0;
+  gate[0] = 0;
+  kept[0] = 0;
+  /* OAuth is only honored on the TV client. Public songs still need a visitor
+   * id or YouTube answers LOGIN_REQUIRED ("sign in to confirm you're not a bot"). */
+  if (g_refresh[0] && ensure_access(gate, (int)sizeof gate) == 0) signed_in = 1;
+  ensure_visitor();
+  for (attempt = 0; attempt < 2; attempt++) {
+    if (player_call(video_id, "www.youtube.com", "VISIONOS", "1.02", vision_ua,
+                    "https://www.youtube.com/", "101", vision_extra, 0, url, url_n, duration, err,
+                    err_n) == 0)
+      return 0;
+    if (!strstr(err, "sign in")) break;
+    g_visitor[0] = 0;
+    if (ensure_visitor() != 0) break;
   }
+  snprintf(kept, sizeof kept, "%s", err);
+  if (signed_in &&
+      player_call(video_id, "www.youtube.com", "TVHTML5", "7.20261007.13.00",
+                  "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold "
+                  "(unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)",
+                  "https://www.youtube.com/tv", "7", "", 1, url, url_n, duration, err,
+                  err_n) == 0)
+    return 0;
+  if (kept[0]) snprintf(err, (size_t)err_n, "%s", kept);
+  else if (!signed_in && gate[0]) snprintf(err, (size_t)err_n, "%s", gate);
   return -1;
 }
 

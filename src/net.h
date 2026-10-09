@@ -12,6 +12,9 @@ int ytm_search(const char *query, Track *out, int max, char *err, int err_n);
 /* Writes a direct googlevideo audio URL. duration may be 0 if unknown. */
 int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration,
                   char *err, int err_n);
+/* User-Agent and Referer that match the client which produced the last URL. */
+const char *ytm_stream_ua(void);
+const char *ytm_stream_referer(void);
 
 /* YouTube TV device-code OAuth. Poll returns 0 when approved, 1 while waiting, -1 on failure. */
 int ytm_auth_begin(char *user_code, int code_n, char *verify_url, int url_n, int *interval,

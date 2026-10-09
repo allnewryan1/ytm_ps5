@@ -596,20 +596,14 @@ static void draw_cover(Draw *d, int x, int y, int size, const char *label, int r
   int r, g, b;
   char letter[2];
   int tw;
+  int rad = size > 200 ? 28 : size > 100 ? 20 : 16;
   cover_rgb(label, &r, &g, &b);
-  if (ring) fill_v(d, x - 6, y - 6, size + 12, size + 12, 212, 166, 86);
-  fill_v(d, x, y, size, size, r, g, b);
+  if (ring) fill_round(d, x - 6, y - 6, size + 12, size + 12, rad + 6, 212, 166, 86);
+  fill_round(d, x, y, size, size, rad, r, g, b);
   letter[0] = (label && label[0]) ? (char)toupper((unsigned char)label[0]) : 'M';
   letter[1] = 0;
   tw = text_px(letter, 1);
   draw_text(d, x + (size - tw) / 2, y + size / 2 - 18, 1, 255, 248, 236, letter);
-}
-
-static void stroke(Draw *d, int x, int y, int w, int h, int t, int r, int g, int b) {
-  fill_v(d, x, y, w, t, r, g, b);
-  fill_v(d, x, y + h - t, w, t, r, g, b);
-  fill_v(d, x, y, t, h, r, g, b);
-  fill_v(d, x + w - t, y, t, h, r, g, b);
 }
 
 static void present(Draw *d) {
@@ -657,9 +651,10 @@ static void paint(void) {
     int w = 0;
     if (dur < 1) dur = now->seconds;
     fill_v(&d, 0, 0, 1920, 1080, 8, 9, 12);
-    stroke(&d, 16, 16, 1888, HINT_Y - 32, 6, 212, 166, 86);
-    fill_v(&d, 40, 34, 340, 42, 212, 166, 86);
-    draw_text(&d, 52, 40, 1, 24, 18, 8, "Controlling the player");
+    fill_round(&d, 28, 24, 1864, HINT_Y - 48, 36, 212, 166, 86);
+    fill_round(&d, 36, 32, 1848, HINT_Y - 64, 32, 8, 9, 12);
+    fill_round(&d, 56, 48, 380, 44, 22, 212, 166, 86);
+    draw_text(&d, 76, 54, 1, 24, 18, 8, "Controlling the player");
     draw_cover(&d, 780, 96, 360, now->title, 0);
     fit(line, (int)sizeof line, now->title, 2, 1500);
     draw_text(&d, (1920 - text_px(line, 2)) / 2, 500, 2, 244, 242, 236, line);
@@ -669,12 +664,12 @@ static void paint(void) {
               630, 1, library_has(now->id) ? 212 : 150, library_has(now->id) ? 166 : 152,
               library_has(now->id) ? 86 : 140,
               library_has(now->id) ? "Saved on this console" : "Square saves this song");
-    fill_v(&d, 360, 700, 1200, 8, 40, 42, 52);
+    fill_round(&d, 360, 700, 1200, 10, 5, 40, 42, 52);
     if (dur > 0) {
       w = (int)(1200.0 * (pos / (double)dur));
       if (w < 0) w = 0;
       if (w > 1200) w = 1200;
-      fill_v(&d, 360, 700, w, 8, 212, 166, 86);
+      fill_round(&d, 360, 700, w, 10, 5, 212, 166, 86);
     }
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);
@@ -717,22 +712,22 @@ static void paint(void) {
     int y = 156 + i * 68;
     int on = (g_nav == i);
     if (on) {
-      fill_v(&d, 0, y - 8, 6, 48, 212, 166, 86);
-      if (g_zone == ZONE_NAV) fill_v(&d, 16, y - 8, RAIL - 32, 48, 32, 34, 44);
+      fill_round(&d, 16, y - 8, RAIL - 32, 48, 24, g_zone == ZONE_NAV ? 54 : 32,
+                 g_zone == ZONE_NAV ? 44 : 34, g_zone == ZONE_NAV ? 28 : 44);
     }
     draw_text(&d, 36, y, 1, on ? 244 : 150, on ? 242 : 152, on ? 236 : 164, nav_name[i]);
   }
   {
     int on = (g_nav == NAV_QUIT);
-    if (on && g_zone == ZONE_NAV) fill_v(&d, 16, BAR_Y - 78, RAIL - 32, 52, 32, 34, 44);
-    if (on) fill_v(&d, 0, BAR_Y - 78, 6, 52, 212, 166, 86);
+    if (on) fill_round(&d, 16, BAR_Y - 78, RAIL - 32, 52, 24, g_zone == ZONE_NAV ? 54 : 32,
+                       g_zone == ZONE_NAV ? 44 : 34, g_zone == ZONE_NAV ? 28 : 44);
     draw_text(&d, 36, BAR_Y - 70, 1, on ? 244 : 120, on ? 242 : 122, on ? 236 : 132, "Quit");
   }
 
   if (g_body == BODY_HOME) {
     int pill = (g_zone == ZONE_BODY && g_home < 0);
     const char *hint = g_status[0] ? g_status : "Search songs, albums, artists";
-    fill_v(&d, RAIL + 28, 24, 1560, 64, pill ? 244 : 28, pill ? 242 : 30, pill ? 236 : 38);
+    fill_round(&d, RAIL + 28, 24, 1560, 64, 32, pill ? 244 : 28, pill ? 242 : 30, pill ? 236 : 38);
     fit(line, (int)sizeof line, hint, 1, 1500);
     draw_text(&d, RAIL + 48, 38, 1, pill ? 20 : (g_status[0] ? 232 : 150), pill ? 18 : (g_status[0] ? 120 : 152),
               pill ? 16 : (g_status[0] ? 96 : 164), line);
@@ -743,17 +738,14 @@ static void paint(void) {
       int x = RAIL + 28 + col * 390;
       int y = row == 0 ? 160 : 480;
       int sel = (g_zone == ZONE_BODY && g_home == i);
-      int cr, cg, cb;
-      cover_rgb(moods[i][0], &cr, &cg, &cb);
-      if (sel) fill_v(&d, x - 4, y - 4, 368, 308, 212, 166, 86);
-      fill_v(&d, x, y, 360, 300, 24, 26, 34);
-      fill_v(&d, x, y, 360, 8, cr, cg, cb);
+      if (sel) fill_round(&d, x - 4, y - 4, 368, 308, 32, 212, 166, 86);
+      fill_round(&d, x, y, 360, 300, 28, 24, 26, 34);
       draw_cover(&d, x + 96, y + 36, 168, moods[i][0], 0);
       draw_text(&d, x + 24, y + 220, 1, 244, 242, 236, moods[i][0]);
       draw_text(&d, x + 24, y + 252, 1, 150, 152, 164, "X plays this shelf");
     }
   } else if (g_body == BODY_SEARCH) {
-    fill_v(&d, RAIL + 28, 24, 1560, 64, 28, 30, 38);
+    fill_round(&d, RAIL + 28, 24, 1560, 64, 32, 28, 30, 38);
     fit(line, (int)sizeof line, g_query[0] ? g_query : "Search songs, albums, artists", 1, 1500);
     draw_text(&d, RAIL + 48, 38, 1, g_query[0] ? 244 : 140, g_query[0] ? 242 : 142, g_query[0] ? 236 : 154, line);
     for (int r = 0; r < 5; r++) {
@@ -765,7 +757,7 @@ static void paint(void) {
         int sel = (g_zone == ZONE_BODY && g_keyr == r && g_keyc == c);
         char lab[8];
         int kw = r == 4 ? 250 : 104;
-        fill_v(&d, x, y, kw, 84, sel ? 244 : 32, sel ? 242 : 34, sel ? 236 : 44);
+        fill_round(&d, x, y, kw, 84, 20, sel ? 244 : 32, sel ? 242 : 34, sel ? 236 : 44);
         if (r < 4) {
           lab[0] = krow[r][c];
           lab[1] = 0;
@@ -789,7 +781,8 @@ static void paint(void) {
       draw_text(&d, RAIL + 28, 120, 1, 168, 170, 180, "On a phone or computer, open");
       draw_text(&d, RAIL + 28, 164, 1, 212, 166, 86, shown[0] ? shown : "google.com/device");
       draw_text(&d, RAIL + 28, 220, 1, 168, 170, 180, "and enter this code");
-      draw_text(&d, RAIL + 28, 280, 2, 244, 242, 236, g_user_code[0] ? g_user_code : "...");
+      fill_round(&d, RAIL + 28, 268, 560, 84, 24, 28, 30, 38);
+      draw_text(&d, RAIL + 52, 292, 2, 244, 242, 236, g_user_code[0] ? g_user_code : "...");
       if (g_status[0]) {
         fit(line, (int)sizeof line, g_status, 1, 1400);
         draw_text(&d, RAIL + 28, 380, 1, 232, 160, 110, line);
@@ -801,8 +794,7 @@ static void paint(void) {
       for (int i = 0; i < 2; i++) {
         int y = 200 + i * 100;
         int sel = (g_zone == ZONE_BODY && g_acct_sel == i);
-        if (sel) fill_v(&d, RAIL + 16, y, 900, 80, 32, 34, 44);
-        if (sel) fill_v(&d, RAIL + 16, y, 6, 80, 212, 166, 86);
+        if (sel) fill_round(&d, RAIL + 16, y, 900, 80, 24, 42, 36, 28);
         draw_text(&d, RAIL + 40, y + 22, 1, 244, 242, 236, rows[i]);
       }
     }
@@ -822,8 +814,7 @@ static void paint(void) {
       int y = 130 + i * 120;
       int sel = (g_zone == ZONE_BODY && g_sel == idx);
       char time[16];
-      if (sel) fill_v(&d, RAIL + 16, y - 8, 1588, 108, 32, 34, 44);
-      if (sel) fill_v(&d, RAIL + 16, y - 8, 6, 108, 212, 166, 86);
+      if (sel) fill_round(&d, RAIL + 16, y - 8, 1588, 108, 24, 32, 34, 44);
       draw_cover(&d, RAIL + 36, y, 84, list[idx].title, 0);
       fit(line, (int)sizeof line, list[idx].title, 1, 980);
       draw_text(&d, RAIL + 140, y + 8, 1, 244, 242, 236, line);
@@ -837,8 +828,7 @@ static void paint(void) {
     }
   }
 
-  fill_v(&d, 0, BAR_Y, 1920, HINT_Y - BAR_Y, 22, 23, 30);
-  fill_v(&d, 0, BAR_Y, 1920, 2, 48, 50, 60);
+  fill_round(&d, 16, BAR_Y + 8, 1888, HINT_Y - BAR_Y - 16, 28, 28, 30, 38);
   if (now) {
     char a[16], b[16];
     int dur = (int)player_duration();
@@ -853,12 +843,12 @@ static void paint(void) {
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);
     draw_text(&d, 820, BAR_Y + 16, 1, 168, 170, 180, a);
-    fill_v(&d, 940, BAR_Y + 36, 620, 6, 48, 50, 60);
+    fill_round(&d, 940, BAR_Y + 34, 620, 10, 5, 48, 50, 60);
     if (dur > 0) {
       int w = (int)(620.0 * (pos / (double)dur));
       if (w < 0) w = 0;
       if (w > 620) w = 620;
-      fill_v(&d, 940, BAR_Y + 36, w, 6, 212, 166, 86);
+      fill_round(&d, 940, BAR_Y + 34, w, 10, 5, 212, 166, 86);
     }
     draw_text(&d, 1580, BAR_Y + 16, 1, 168, 170, 180, b);
     snprintf(line, sizeof line, "vol %d", player_volume());
