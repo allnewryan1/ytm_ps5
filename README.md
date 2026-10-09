@@ -50,6 +50,7 @@ The install folder stays `PPSA99105`. The home screen title is YouTube Music. `e
 | --- | --- |
 | D-pad / left stick | Move |
 | Cross | Open, play, or pause |
+| Square | Song menu: play next, add to queue, album, artist |
 | Circle | Back |
 | Triangle | Now playing, queue on that card |
 | Options | Search |
@@ -58,6 +59,8 @@ The install folder stays `PPSA99105`. The home screen title is YouTube Music. `e
 | L2 / R2 | Volume, while Now playing is open |
 | Left / right on the player | Seek 10 seconds |
 | Up / down on the player | Move through the queue |
+
+Cross on a song plays that song. If it is not already in the queue, the queue becomes just that song. Square is where Play next and Add to queue live. Opening an album or a playlist with Cross still replaces the queue with that list.
 
 A USB keyboard works too: arrows, Enter, Esc, and Backspace.
 

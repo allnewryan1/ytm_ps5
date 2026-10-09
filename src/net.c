@@ -40,26 +40,35 @@ static int g_http = -1;
 static int g_tmpl = -1;
 static char *g_resp;
 
-#define COVER_SIDE 360
-#define COVER_SLOTS 20
+#define GRID_SIDE 128
+#define GRID_SLOTS 96
+#define HERO_SIDE 360
+#define HERO_SLOTS 3
 typedef struct {
   char key[80];
   unsigned char *px;
   unsigned stamp;
   int fails;
 } CoverSlot;
-static CoverSlot g_cover[COVER_SLOTS];
-static unsigned g_cover_tick;
+static CoverSlot g_grid[GRID_SLOTS];
+static CoverSlot g_hero[HERO_SLOTS];
+static unsigned g_grid_tick;
+static unsigned g_hero_tick;
+
+static void cover_pool_clear(CoverSlot *slots, int n) {
+  int i;
+  for (i = 0; i < n; i++) {
+    free(slots[i].px);
+    slots[i].px = NULL;
+    slots[i].key[0] = 0;
+    slots[i].stamp = 0;
+    slots[i].fails = 0;
+  }
+}
 
 static void cover_clear(void) {
-  int i;
-  for (i = 0; i < COVER_SLOTS; i++) {
-    free(g_cover[i].px);
-    g_cover[i].px = NULL;
-    g_cover[i].key[0] = 0;
-    g_cover[i].stamp = 0;
-    g_cover[i].fails = 0;
-  }
+  cover_pool_clear(g_grid, GRID_SLOTS);
+  cover_pool_clear(g_hero, HERO_SLOTS);
 }
 
 static int hex_nibble(char c) {
@@ -279,6 +288,11 @@ static char g_refresh[1024];
 static char g_device_code[256];
 static char g_visitor[128];
 static time_t g_access_exp;
+/* Account home must not send the anonymous visitor id. A request-time header
+ * matches the web music client used by ytmusicapi's OAuth session. */
+static int g_skip_visitor;
+static int g_send_reqtime;
+static const char *g_api_format;
 
 static int http_post_ex(const char *url, const char *body, const char *ua, const char *origin,
                          const char *referer, const char *client_name, const char *client_ver,
@@ -306,8 +320,16 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
     sceHttp2AddRequestHeader(req, "X-YouTube-Client-Name", client_name, SCE_HTTP_HEADER_OVERWRITE);
   if (client_ver)
     sceHttp2AddRequestHeader(req, "X-YouTube-Client-Version", client_ver, SCE_HTTP_HEADER_OVERWRITE);
-  if (g_visitor[0])
+  if (g_api_format && g_api_format[0])
+    sceHttp2AddRequestHeader(req, "X-Goog-Api-Format-Version", g_api_format,
+                             SCE_HTTP_HEADER_OVERWRITE);
+  if (g_visitor[0] && !g_skip_visitor)
     sceHttp2AddRequestHeader(req, "X-Goog-Visitor-Id", g_visitor, SCE_HTTP_HEADER_OVERWRITE);
+  if (g_send_reqtime) {
+    char ts[32];
+    snprintf(ts, sizeof ts, "%lld", (long long)time(NULL));
+    sceHttp2AddRequestHeader(req, "X-Goog-Request-Time", ts, SCE_HTTP_HEADER_OVERWRITE);
+  }
   if (authed && g_access[0]) {
     char auth[2100];
     snprintf(auth, sizeof auth, "Bearer %s", g_access);
@@ -449,6 +471,19 @@ static void finish_track(Track *t) {
   if (!t->artist[0])
     snprintf(t->artist, sizeof t->artist, "%s", t->browse[0] && !t->id[0] ? "Playlist" : "YouTube Music");
   store_thumb(t, t->thumb);
+}
+
+static void note_browse_ids(const char *s, const char *end, Track *t) {
+  const char *p = s;
+  while ((p = find_bounded(p, end, "\"browseId\":\"")) != NULL) {
+    char id[YTM_BROWSE_LEN];
+    copy_json_str(p + 12, id, (int)sizeof id);
+    p += 12;
+    if (strncmp(id, "MPREb_", 6) == 0 && !t->album_id[0])
+      snprintf(t->album_id, sizeof t->album_id, "%s", id);
+    else if (strncmp(id, "UC", 2) == 0 && strlen(id) > 8 && !t->artist_id[0])
+      snprintf(t->artist_id, sizeof t->artist_id, "%s", id);
+  }
 }
 
 static int take_vid(const char *p, const char *end, char *id) {
@@ -618,6 +653,7 @@ static void parse_mrlir(const char *s, const char *end, Track *t) {
       if (clock_seconds(tmp) >= 0) t->seconds = clock_seconds(tmp);
     }
   }
+  note_browse_ids(s, end, t);
 }
 
 static void parse_card(const char *s, const char *end, Track *t) {
@@ -637,6 +673,7 @@ static void parse_card(const char *s, const char *end, Track *t) {
     if (send > end) send = end;
     if (obj) runs_into(obj, send, t, 0);
   }
+  note_browse_ids(s, end, t);
 }
 
 static void parse_tile(const char *s, const char *end, Track *t) {
@@ -662,6 +699,7 @@ static void parse_tile(const char *s, const char *end, Track *t) {
       if (clock_seconds(tmp) >= 0) t->seconds = clock_seconds(tmp);
     }
   }
+  note_browse_ids(s, end, t);
 }
 
 static int good_browse(const char *id) {
@@ -675,14 +713,69 @@ static int good_browse(const char *id) {
   return 0;
 }
 
-static int bad_page(const char *s, const char *end) {
+static int page_is(const char *s, const char *end, const char *type) {
   const char *p = find_bounded(s, end, "\"pageType\":\"");
-  if (!p) return 0;
+  size_t n;
+  if (!p || !type) return 0;
   p += 12;
-  if (strncmp(p, "MUSIC_PAGE_TYPE_PODCAST", 23) == 0) return 1;
-  if (strncmp(p, "MUSIC_PAGE_TYPE_ARTIST", 22) == 0) return 1;
-  if (strncmp(p, "MUSIC_PAGE_TYPE_USER_CHANNEL", 28) == 0) return 1;
-  return 0;
+  n = strlen(type);
+  if ((size_t)(end - p) < n + 1) return 0;
+  return strncmp(p, type, n) == 0 && p[n] == '"';
+}
+
+/* Item click target only. Album and artist links inside the subtitle are nested
+ * deeper, and treating those as the row dropped every quick pick. */
+static const char *top_key(const char *s, const char *end, const char *key) {
+  int depth = 0;
+  int in_str = 0;
+  size_t kn = strlen(key);
+  const char *p;
+  if (!s || *s != '{') return find_bounded(s, end, key);
+  for (p = s; p < end; p++) {
+    if (in_str) {
+      if (*p == '\\' && p + 1 < end) {
+        p++;
+        continue;
+      }
+      if (*p == '"') in_str = 0;
+      continue;
+    }
+    if (*p == '"') {
+      if (depth == 1 && (size_t)(end - p) >= kn && memcmp(p, key, kn) == 0) return p;
+      in_str = 1;
+      continue;
+    }
+    if (*p == '{' || *p == '[') depth++;
+    else if (*p == '}' || *p == ']') {
+      depth--;
+      if (depth <= 0) break;
+    }
+  }
+  return NULL;
+}
+
+static int nav_page(const char *s, const char *end, const char *type) {
+  const char *nav = top_key(s, end, "\"navigationEndpoint\"");
+  const char *obj;
+  const char *lim;
+  if (!nav) return 0;
+  obj = strchr(nav, '{');
+  if (!obj || obj >= end) return 0;
+  lim = json_end(obj);
+  if (lim > end) lim = end;
+  return page_is(obj, lim, type);
+}
+
+static void store_playlist(Track *t, const char *pid) {
+  if (!pid || !pid[0] || strncmp(pid, "RD", 2) == 0) return;
+  if ((int)strlen(pid) + 3 >= YTM_BROWSE_LEN) return;
+  if (strncmp(pid, "VL", 2) == 0) {
+    memcpy(t->browse, pid, strlen(pid) + 1);
+    return;
+  }
+  t->browse[0] = 'V';
+  t->browse[1] = 'L';
+  memcpy(t->browse + 2, pid, strlen(pid) + 1);
 }
 
 static void parse_two(const char *s, const char *end, Track *t) {
@@ -690,25 +783,35 @@ static void parse_two(const char *s, const char *end, Track *t) {
   const char *lim = menu ? menu : end;
   const char *title = find_bounded(s, lim, "\"title\":");
   const char *sub = find_bounded(s, lim, "\"subtitle\":");
-  const char *bid = NULL;
   const char *vid;
   const char *p = s;
   char url[300];
-  if (bad_page(s, lim)) return;
+  int shelf;
+  if (nav_page(s, end, "MUSIC_PAGE_TYPE_PODCAST") || nav_page(s, end, "MUSIC_PAGE_TYPE_ARTIST") ||
+      nav_page(s, end, "MUSIC_PAGE_TYPE_USER_CHANNEL"))
+    return;
+  shelf = nav_page(s, end, "MUSIC_PAGE_TYPE_ALBUM") || nav_page(s, end, "MUSIC_PAGE_TYPE_PLAYLIST");
   while ((p = find_bounded(p, lim, "\"browseId\":\"")) != NULL) {
     char id[YTM_BROWSE_LEN];
     copy_json_str(p + 12, id, (int)sizeof id);
     p += 12;
     if (good_browse(id)) {
       snprintf(t->browse, sizeof t->browse, "%s", id);
-      bid = p;
       break;
     }
   }
+  if (!t->browse[0]) {
+    const char *pl = find_bounded(s, lim, "\"playlistId\":\"");
+    char pid[64];
+    pid[0] = 0;
+    if (pl) copy_json_str(pl + 14, pid, (int)sizeof pid);
+    store_playlist(t, pid);
+  }
   vid = find_bounded(s, lim, "\"videoId\":\"");
-  if (vid) take_vid(vid + 11, lim, t->id);
+  if (vid && !shelf) take_vid(vid + 11, lim, t->id);
   if (!t->browse[0] && !t->id[0]) return;
-  (void)bid;
+  /* A song keeps its album id for the menu. The browse field is the shelf. */
+  if (t->id[0] && strncmp(t->browse, "MPREb_", 6) == 0) t->browse[0] = 0;
   if (title) {
     const char *obj = strchr(title, '{');
     const char *tend = obj ? json_end(obj) : lim;
@@ -721,6 +824,7 @@ static void parse_two(const char *s, const char *end, Track *t) {
     if (send > lim) send = lim;
     if (obj) runs_into(obj, send, t, 0);
   }
+  note_browse_ids(s, end, t);
   url[0] = 0;
   p = find_bounded(s, lim, "\"url\":\"");
   if (p) copy_json_str(p + 7, url, (int)sizeof url);
@@ -1247,17 +1351,147 @@ static int chart_rank(const Track *t) {
   return 1;
 }
 
+static Track g_raw[80];
+
 static void split_home(const char *json, Track *songs, int song_max, int *nsongs, Track *mixes,
                        int mix_max, int *nmixes) {
   int n = 0;
-  walk_kind(json, "\"musicResponsiveListItemRenderer\":", songs, &n, song_max, parse_mrlir);
-  walk_kind(json, "\"musicCardShelfRenderer\":", songs, &n, song_max, parse_card);
-  walk_kind(json, "\"tileRenderer\":", songs, &n, song_max, parse_tile);
-  walk_kind(json, "\"musicTwoRowItemRenderer\":", songs, &n, song_max, parse_two);
-  *nsongs = keep_ids(songs, n);
-  n = 0;
-  walk_kind(json, "\"musicTwoRowItemRenderer\":", mixes, &n, mix_max, parse_two);
-  *nmixes = keep_mixes(mixes, n);
+  int i;
+  /* One page mixes songs and albums. Classify after the walk so albums cannot
+   * fill the song cap before the quick picks are seen. */
+  walk_kind(json, "\"musicResponsiveListItemRenderer\":", g_raw, &n, 80, parse_mrlir);
+  walk_kind(json, "\"musicCardShelfRenderer\":", g_raw, &n, 80, parse_card);
+  walk_kind(json, "\"tileRenderer\":", g_raw, &n, 80, parse_tile);
+  walk_kind(json, "\"musicTwoRowItemRenderer\":", g_raw, &n, 80, parse_two);
+  for (i = 0; i < n; i++) {
+    if (g_raw[i].id[0]) add_track(songs, nsongs, song_max, &g_raw[i]);
+    else if (g_raw[i].browse[0]) add_track(mixes, nmixes, mix_max, &g_raw[i]);
+  }
+}
+
+static void web_client_version(char *dst, int n) {
+  time_t now = time(NULL);
+  struct tm *tm = gmtime(&now);
+  if (!tm) {
+    snprintf(dst, (size_t)n, "1.20261009.01.00");
+    return;
+  }
+  snprintf(dst, (size_t)n, "1.%04d%02d%02d.01.00", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+}
+
+static int take_continuation(const char *json, char *out, int n) {
+  const char *p;
+  const char *c;
+  if (!json || !out || n < 16) return 0;
+  out[0] = 0;
+  p = strstr(json, "\"nextContinuationData\"");
+  if (!p) p = strstr(json, "\"continuationEndpoint\"");
+  if (!p) return 0;
+  c = strstr(p, "\"continuation\":\"");
+  if (!c || c > p + 900) return 0;
+  copy_json_str(c + 16, out, n);
+  if ((int)strlen(out) < 12 || strchr(out, '"') || strchr(out, '\\')) {
+    out[0] = 0;
+    return 0;
+  }
+  return 1;
+}
+
+static void name_mixes(const Track *mixes, int n) {
+  int albums = 0;
+  int lists = 0;
+  int i;
+  for (i = 0; i < n; i++) {
+    if (strncmp(mixes[i].browse, "MPREb_", 6) == 0) albums++;
+    else lists++;
+  }
+  if (albums && lists)
+    snprintf(g_mix_heading, sizeof g_mix_heading, "Albums & playlists");
+  else if (albums)
+    snprintf(g_mix_heading, sizeof g_mix_heading, "Albums");
+  else
+    snprintf(g_mix_heading, sizeof g_mix_heading, "Playlists");
+}
+
+/* kind 0 is WEB_REMIX with the account token and no visitor id (ytmusicapi OAuth).
+ * kind 1 is the Android Music client. kind 2 is the TV client. */
+static int post_account_home(int kind, const char *region, const char *cont, int *status,
+                             char *err, int err_n) {
+  char ver[32];
+  char body[4600];
+  char url[280];
+  const char *cc = (region && region[0] && strcmp(region, "ZZ") != 0) ? region : "US";
+  int skip;
+  int rt;
+  int n;
+  const char *use = (cont && cont[0] && (int)strlen(cont) < 3800) ? cont : NULL;
+  web_client_version(ver, (int)sizeof ver);
+  if (kind == 2) {
+    snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false");
+    if (use)
+      snprintf(body, sizeof body,
+               "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
+               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+               "\"continuation\":\"%s\"}",
+               TV_VER, cc, use);
+    else
+      snprintf(body, sizeof body,
+               "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
+               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+               "\"browseId\":\"FEmusic_home\"}",
+               TV_VER, cc);
+  } else if (kind == 1) {
+    snprintf(url, sizeof url, "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false");
+    if (use)
+      snprintf(body, sizeof body,
+               "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\","
+               "\"clientVersion\":\"7.27.52\",\"androidSdkVersion\":30,"
+               "\"hl\":\"en\",\"gl\":\"%s\"}},\"continuation\":\"%s\"}",
+               cc, use);
+    else
+      snprintf(body, sizeof body,
+               "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\","
+               "\"clientVersion\":\"7.27.52\",\"androidSdkVersion\":30,"
+               "\"hl\":\"en\",\"gl\":\"%s\"}},\"browseId\":\"FEmusic_home\"}",
+               cc);
+  } else {
+    snprintf(url, sizeof url,
+             "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
+    if (use)
+      snprintf(body, sizeof body,
+               "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+               "\"continuation\":\"%s\"}",
+               ver, cc, use);
+    else
+      snprintf(body, sizeof body,
+               "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+               "\"browseId\":\"FEmusic_home\"}",
+               ver, cc);
+  }
+  skip = g_skip_visitor;
+  rt = g_send_reqtime;
+  g_skip_visitor = 1;
+  g_send_reqtime = 1;
+  g_api_format = (kind == 1) ? "2" : NULL;
+  if (kind == 2)
+    n = http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
+                     TV_VER, 1, 1, status, err, err_n);
+  else if (kind == 1)
+    n = http_post_ex(url, body,
+                     "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 11) gzip",
+                     "https://music.youtube.com", "https://music.youtube.com/", "21", "7.27.52", 1,
+                     1, status, err, err_n);
+  else
+    n = http_post_ex(url, body,
+                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+                     "https://music.youtube.com", "https://music.youtube.com/", NULL, NULL, 1, 1,
+                     status, err, err_n);
+  g_api_format = NULL;
+  g_skip_visitor = skip;
+  g_send_reqtime = rt;
+  return n;
 }
 
 int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max, int *nmixes,
@@ -1265,60 +1499,80 @@ int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max,
   char body[768];
   char url[256];
   char region[4];
+  char ver[32];
+  char saved[160];
   Track charts[12];
   int status = 0;
   int n;
   int ncharts = 0;
   int authed = 0;
-  int got = 0;
   int best = -1;
   int bi = 0;
   if (nsongs) *nsongs = 0;
   if (nmixes) *nmixes = 0;
   g_song_heading[0] = 0;
   g_mix_heading[0] = 0;
-  if (!songs || !mixes || song_max < 1 || mix_max < 1) return -1;
+  saved[0] = 0;
+  if (!songs || !mixes || !nsongs || !nmixes || song_max < 1 || mix_max < 1) return -1;
   if (lookup_region(region, (int)sizeof region) != 0) snprintf(region, sizeof region, "ZZ");
   snprintf(g_place, sizeof g_place, "%s", region);
   if (g_refresh[0] && ensure_access(err, err_n) == 0) authed = 1;
-  /* Same browse id as ytmusicapi YTMusic.get_home. */
   if (authed) {
-    snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false");
-    snprintf(body, sizeof body,
-             "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
-             "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
-             "\"browseId\":\"FEmusic_home\"}",
-             TV_VER, region);
-    if (http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
-                     TV_VER, 1, 1, &status, err, err_n) > 0 &&
-        status == 200 && g_resp && g_resp[0])
-      got = 1;
+    int kind;
+    for (kind = 0; kind < 3 && *nsongs + *nmixes == 0; kind++) {
+      char cont[3072];
+      int pass;
+      *nsongs = 0;
+      *nmixes = 0;
+      cont[0] = 0;
+      for (pass = 0; pass < 2; pass++) {
+        n = post_account_home(kind, region, pass ? cont : NULL, &status, err, err_n);
+        if (n > 0 && status == 200 && g_resp && g_resp[0]) {
+          split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
+          if (pass == 0 && *nsongs < song_max && *nmixes < mix_max &&
+              take_continuation(g_resp, cont, (int)sizeof cont))
+            continue;
+        } else if (status > 0 && status != 200) {
+          snprintf(saved, sizeof saved, "Home HTTP %d", status);
+        } else if (n < 0 && err[0]) {
+          snprintf(saved, sizeof saved, "%s", err);
+        }
+        break;
+      }
+    }
+    if (*nsongs > 0) snprintf(g_song_heading, sizeof g_song_heading, "Quick play");
+    if (*nmixes > 0) name_mixes(mixes, *nmixes);
+    if (*nsongs + *nmixes == 0) {
+      if (saved[0]) snprintf(err, (size_t)err_n, "%s", saved);
+      else snprintf(err, (size_t)err_n, "No recommendations for this account");
+      return -1;
+    }
+    err[0] = 0;
+    return 0;
   }
-  if (!got) {
-    snprintf(url, sizeof url,
-             "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
-    snprintf(body, sizeof body,
-             "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-             "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"%s\"}},"
-             "\"browseId\":\"FEmusic_home\"}",
-             region);
-    if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
-                     NULL, NULL, 0, 1, &status, err, err_n) > 0 &&
-        status == 200 && g_resp && g_resp[0])
-      got = 1;
-  }
-  if (got) split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
+  /* Signed out: public home, then country charts. Same browse ids as get_home / get_charts. */
+  web_client_version(ver, (int)sizeof ver);
+  snprintf(url, sizeof url,
+           "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+           "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+           "\"browseId\":\"FEmusic_home\"}",
+           ver, strcmp(region, "ZZ") == 0 ? "US" : region);
+  if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/", NULL,
+                   NULL, 0, 1, &status, err, err_n) > 0 &&
+      status == 200 && g_resp && g_resp[0])
+    split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
   if (*nsongs > 0) snprintf(g_song_heading, sizeof g_song_heading, "Quick play");
-  if (*nmixes > 0) snprintf(g_mix_heading, sizeof g_mix_heading, "Playlists");
-  /* Country charts when home has no songs or no playlists. Same request as get_charts. */
+  if (*nmixes > 0) name_mixes(mixes, *nmixes);
   if (*nsongs == 0 || *nmixes == 0) {
     snprintf(url, sizeof url,
              "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
     snprintf(body, sizeof body,
              "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-             "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+             "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
              "\"browseId\":\"FEmusic_charts\",\"formData\":{\"selectedValues\":[\"%s\"]}}",
-             region, region);
+             ver, strcmp(region, "ZZ") == 0 ? "US" : region, region);
     if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
                      NULL, NULL, 0, 1, &status, err, err_n) > 0 &&
         status == 200 && g_resp && g_resp[0]) {
@@ -1573,22 +1827,22 @@ static const char *cover_key_of(const Track *t, char *tmp, int n) {
   return tmp;
 }
 
-static CoverSlot *cover_find(const char *key) {
+static CoverSlot *cover_find(CoverSlot *slots, int nslots, const char *key) {
   int i;
-  for (i = 0; i < COVER_SLOTS; i++) {
-    if (g_cover[i].key[0] && strcmp(g_cover[i].key, key) == 0) return &g_cover[i];
+  for (i = 0; i < nslots; i++) {
+    if (slots[i].key[0] && strcmp(slots[i].key, key) == 0) return &slots[i];
   }
   return NULL;
 }
 
-static CoverSlot *cover_slot(const char *key) {
-  CoverSlot *slot = cover_find(key);
+static CoverSlot *cover_slot(CoverSlot *slots, int nslots, const char *key) {
+  CoverSlot *slot = cover_find(slots, nslots, key);
   CoverSlot *victim = NULL;
   int i;
   if (slot) return slot;
-  for (i = 0; i < COVER_SLOTS; i++) {
-    if (!g_cover[i].key[0]) return &g_cover[i];
-    if (!victim || g_cover[i].stamp < victim->stamp) victim = &g_cover[i];
+  for (i = 0; i < nslots; i++) {
+    if (!slots[i].key[0]) return &slots[i];
+    if (!victim || slots[i].stamp < victim->stamp) victim = &slots[i];
   }
   free(victim->px);
   victim->px = NULL;
@@ -1597,34 +1851,34 @@ static CoverSlot *cover_slot(const char *key) {
   return victim;
 }
 
-static int try_jpeg(const char *url, unsigned char *buf, unsigned char *dst) {
+static int try_jpeg(const char *url, unsigned char *buf, unsigned char *dst, int side) {
   int status = 0;
   int n;
   if (!url || !url[0]) return -1;
   n = http_get_bin(url, buf, 512 * 1024, &status);
-  if (status == 200 && n > 64 && art_jpeg_square(buf, n, dst, COVER_SIDE) == 0) return 0;
+  if (status == 200 && n > 64 && art_jpeg_square(buf, n, dst, side) == 0) return 0;
   return -1;
 }
 
-int ytm_cover_fetch(const Track *t) {
+static int cover_fetch_pool(CoverSlot *slots, int nslots, int side, unsigned *tick, const Track *t,
+                            int hero) {
   char key[80];
   char url[YTM_THUMB_LEN];
   CoverSlot *slot;
   unsigned char *buf;
   unsigned char *dst;
   int ok = 0;
-  if (!t) return -1;
   cover_key_of(t, key, (int)sizeof key);
   if (!key[0]) return -1;
-  slot = cover_find(key);
+  slot = cover_find(slots, nslots, key);
   if (slot && slot->px) {
-    slot->stamp = ++g_cover_tick;
+    slot->stamp = ++(*tick);
     return 0;
   }
   if (slot && slot->fails >= 3) return -1;
-  slot = cover_slot(key);
+  slot = cover_slot(slots, nslots, key);
   buf = (unsigned char *)malloc(512 * 1024);
-  dst = (unsigned char *)malloc((size_t)COVER_SIDE * COVER_SIDE * 4u);
+  dst = (unsigned char *)malloc((size_t)side * (size_t)side * 4u);
   if (!buf || !dst) {
     free(buf);
     free(dst);
@@ -1632,24 +1886,28 @@ int ytm_cover_fetch(const Track *t) {
   }
   url[0] = 0;
   if (t->id[0]) {
-    snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/hq720.jpg", t->id);
-    if (try_jpeg(url, buf, dst) == 0) ok = 1;
+    if (hero) {
+      snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/hq720.jpg", t->id);
+      if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
+    }
     if (!ok) {
       snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/sddefault.jpg", t->id);
-      if (try_jpeg(url, buf, dst) == 0) ok = 1;
+      if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
     }
     if (!ok) {
       snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", t->id);
-      if (try_jpeg(url, buf, dst) == 0) ok = 1;
+      if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
     }
   }
-  if (!ok && t->thumb[0] && try_jpeg(t->thumb, buf, dst) == 0) ok = 1;
+  if (!ok && t->thumb[0] && !( !hero && strstr(t->thumb, "hq720"))) {
+    if (try_jpeg(t->thumb, buf, dst, side) == 0) ok = 1;
+  }
   if (ok) {
     free(slot->px);
     slot->px = dst;
     slot->fails = 0;
     snprintf(slot->key, sizeof slot->key, "%s", key);
-    slot->stamp = ++g_cover_tick;
+    slot->stamp = ++(*tick);
   } else {
     free(dst);
     if (!slot->key[0] || strcmp(slot->key, key) != 0) {
@@ -1658,22 +1916,31 @@ int ytm_cover_fetch(const Track *t) {
     } else if (slot->fails < 8) {
       slot->fails++;
     }
-    slot->stamp = ++g_cover_tick;
+    slot->stamp = ++(*tick);
   }
   free(buf);
   return slot->px ? 0 : -1;
 }
 
-const unsigned char *ytm_cover_pixels(const Track *t, int *w, int *h) {
+int ytm_cover_fetch(const Track *t, int side) {
+  if (!t) return -1;
+  if (side >= 200)
+    return cover_fetch_pool(g_hero, HERO_SLOTS, HERO_SIDE, &g_hero_tick, t, 1);
+  return cover_fetch_pool(g_grid, GRID_SLOTS, GRID_SIDE, &g_grid_tick, t, 0);
+}
+
+const unsigned char *ytm_cover_pixels(const Track *t, int side, int *w, int *h) {
   char key[80];
   CoverSlot *slot;
+  int hero;
   if (!t) return NULL;
   cover_key_of(t, key, (int)sizeof key);
-  slot = cover_find(key);
+  hero = side >= 200;
+  slot = cover_find(hero ? g_hero : g_grid, hero ? HERO_SLOTS : GRID_SLOTS, key);
   if (!slot || !slot->px) return NULL;
-  slot->stamp = ++g_cover_tick;
-  if (w) *w = COVER_SIDE;
-  if (h) *h = COVER_SIDE;
+  slot->stamp = hero ? ++g_hero_tick : ++g_grid_tick;
+  if (w) *w = hero ? HERO_SIDE : GRID_SIDE;
+  if (h) *h = hero ? HERO_SIDE : GRID_SIDE;
   return slot->px;
 }
 
@@ -1793,9 +2060,9 @@ int main(int argc, char **argv) {
   else c = collect_tracks(buf, out, 40);
   printf("count %d\n", c);
   for (i = 0; i < c && i < 8; i++) {
-    printf("[%d] id=%s browse=%s\n  title=%s\n  artist=%s\n  album=%s\n  sec=%d thumb=%s\n", i,
-           out[i].id, out[i].browse, out[i].title, out[i].artist, out[i].album, out[i].seconds,
-           out[i].thumb);
+    printf("[%d] id=%s browse=%s album=%s artist_id=%s\n  title=%s\n  artist=%s\n  album_name=%s\n  sec=%d thumb=%s\n",
+           i, out[i].id, out[i].browse, out[i].album_id, out[i].artist_id, out[i].title,
+           out[i].artist, out[i].album, out[i].seconds, out[i].thumb);
   }
   free(buf);
   return c > 0 ? 0 : 2;

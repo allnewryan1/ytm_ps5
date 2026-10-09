@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Signed-in For you is the account home. The request is the music web client with that account's token, then the Android music client, then the TV client. Charts are not mixed in. Charts stay the signed-out home.
+- Quick picks stay songs. An album or artist link inside the subtitle is not treated as the row. Square can open the album or the artist without playing it.
+- Row covers are cached at the size the rows use, in a cache large enough to keep the home page. Coming back to home does not fetch them again. The Now Playing photo is stored apart from those rows.
+- Choosing a song that is not already in the queue clears the queue and plays that song. Square opens Play, Play next, Add to queue, Show album, and Show artist.
+
 ## 0.4.0
 
 - Songs stream. The console does not download the file first, so the screen is not stuck while the track copies. The stream address is followed to the host that serves the audio, and the file itself is left for the player.

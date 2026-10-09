@@ -10,6 +10,8 @@
 typedef struct Track {
   char id[YTM_ID_LEN];
   char browse[YTM_BROWSE_LEN];
+  char album_id[YTM_BROWSE_LEN];
+  char artist_id[YTM_BROWSE_LEN];
   char title[YTM_TITLE_LEN];
   char artist[YTM_TITLE_LEN];
   char album[YTM_TITLE_LEN];
