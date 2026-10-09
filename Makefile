@@ -74,10 +74,10 @@ NATIVE_COMPAT := $(NATIVE_DIR)/payload_compat.o
 
 all: $(ELF)
 
-$(ELF): $(SRCS) src/font8x8_basic.h src/app.h
+$(ELF): $(SRCS) src/ui_font.h src/app.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LIBS)
 
-$(NATIVE_DIR)/%.o: src/%.c src/font8x8_basic.h src/app.h
+$(NATIVE_DIR)/%.o: src/%.c src/ui_font.h src/app.h
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -fPIC -ffunction-sections -fdata-sections -c -o $@ $<
 

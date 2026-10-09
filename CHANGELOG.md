@@ -12,4 +12,6 @@
 - Icon and background art are a record and a listening room, not the old play-button tile.
 - Scanout memory comes from the game direct-memory pool. Leaving the process no longer uses the exit syscall the shell reports as a crash.
 - The picture is drawn on the window framebuffer. This SDL port has no render driver.
-- The home-screen allocator uses flexible or direct memory. The libc heap was too small for the framebuffer.
+- Pressing X on a shelf starts that shelf. Audio is a direct AAC stream from the visionOS player client.
+- If playback cannot start, the reason is shown as a notification as well as on screen.
+- The interface uses a plain sans-serif face, and the bottom edge lists the controller buttons.

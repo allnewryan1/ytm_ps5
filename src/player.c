@@ -87,7 +87,10 @@ static void *decode_main(void *arg) {
   fmt->interrupt_callback.opaque = NULL;
 
   av_dict_set(&opts, "user_agent",
-              "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 11)", 0);
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 "
+              "(KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+              0);
+  av_dict_set(&opts, "referer", "https://www.youtube.com/", 0);
   av_dict_set(&opts, "reconnect", "1", 0);
   av_dict_set(&opts, "reconnect_streamed", "1", 0);
   av_dict_set(&opts, "rw_timeout", "15000000", 0);
@@ -236,7 +239,14 @@ done:
 
 int player_start(const char *url, int duration_s) {
   player_stop();
-  if (!url || !url[0] || g_dev == 0) return -1;
+  if (!url || !url[0]) {
+    set_err("Missing audio URL");
+    return -1;
+  }
+  if (g_dev == 0) {
+    set_err("Audio output is not open");
+    return -1;
+  }
   pthread_mutex_lock(&g_mu);
   snprintf(g_url, sizeof g_url, "%s", url);
   g_err[0] = 0;

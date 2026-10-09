@@ -11,8 +11,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define RAIL 280
-#define BOTTOM 972
+#define RAIL 300
+#define BAR_Y 908
+#define HINT_Y 1016
 
 enum { NAV_HOME, NAV_SEARCH, NAV_LIBRARY, NAV_QUIT, NAV_COUNT };
 enum { ZONE_NAV, ZONE_BODY };
@@ -245,11 +246,13 @@ static void play_queue_index(int idx) {
   paint();
   if (ytm_audio_url(g_queue[idx].id, url, (int)sizeof url, &dur, err, (int)sizeof err) != 0) {
     set_status(err);
+    toast(err);
     return;
   }
   if (dur > 0) g_queue[idx].seconds = dur;
   if (player_start(url, g_queue[idx].seconds) != 0) {
     set_status(player_error()[0] ? player_error() : "Playback failed");
+    toast(g_status);
     return;
   }
   snprintf(g_url, sizeof g_url, "%s", url);
@@ -320,6 +323,7 @@ static void on_activate(void) {
       return;
     }
     do_search(moods[g_home][1]);
+    if (g_nresults > 0) play_list(g_results, g_nresults, 0);
   }
   else if (g_body == BODY_LIST) play_list(g_results, g_nresults, g_sel);
   else if (g_body == BODY_LIBRARY) play_list(g_likes, g_nlikes, g_sel);
@@ -366,7 +370,7 @@ static void on_like(void) {
 }
 
 static void keep_sel_visible(int n) {
-  const int vis = 8;
+  const int vis = 6;
   if (n < 1) {
     g_sel = 0;
     g_scroll = 0;
@@ -466,20 +470,39 @@ static void draw_disc(Draw *d, int cx, int cy, int rad, int r, int g, int b) {
 static void draw_cover(Draw *d, int x, int y, int size, const char *label, int ring) {
   int r, g, b;
   char letter[2];
+  int tw;
   cover_rgb(label, &r, &g, &b);
-  if (ring) fill_v(d, x - 4, y - 4, size + 8, size + 8, 255, 255, 255);
+  if (ring) fill_v(d, x - 6, y - 6, size + 12, size + 12, 212, 166, 86);
   fill_v(d, x, y, size, size, r, g, b);
   letter[0] = (label && label[0]) ? (char)toupper((unsigned char)label[0]) : 'M';
   letter[1] = 0;
-  draw_text(d, x + size / 2 - 12, y + size / 2 - 16, size > 120 ? 5 : 3, 255, 255, 255, letter);
+  tw = text_px(letter, 1);
+  draw_text(d, x + (size - tw) / 2, y + size / 2 - 18, 1, 255, 248, 236, letter);
 }
 
-static void present(void) {
+static void present(Draw *d) {
   static int told;
+  draw_end(d);
   if (SDL_UpdateWindowSurface(g_win) == 0) return;
   if (told) return;
   told = 1;
   toast(SDL_GetError());
+}
+
+static void draw_hints(Draw *d) {
+  const char *s;
+  fill_v(d, 0, HINT_Y, 1920, 1080 - HINT_Y, 10, 11, 14);
+  fill_v(d, 0, HINT_Y, 1920, 2, 212, 166, 86);
+  if (g_player_ui) {
+    s = "X Pause    O Back    D-pad Seek / Volume    L1 R1 Skip    Square Like    Create Repeat";
+  } else if (g_body == BODY_SEARCH) {
+    s = "X Type    O Back    D-pad Move    Triangle Player    Square Like    Options Search";
+  } else if (g_body == BODY_HOME) {
+    s = "X Play    O Menu    D-pad Move    Options Search    Square Like    Triangle Player    L1 R1 Skip";
+  } else {
+    s = "X Play    O Home    D-pad Move    Square Like    Triangle Player    Options Search    L1 R1 Skip";
+  }
+  draw_text(d, 28, HINT_Y + 16, 1, 214, 216, 224, s);
 }
 
 static void paint(void) {
@@ -489,8 +512,7 @@ static void paint(void) {
   const Track *now = (g_qindex >= 0 && g_qindex < g_nqueue) ? &g_queue[g_qindex] : NULL;
   if (!surf) return;
   draw_begin(&d, surf);
-
-  fill_v(&d, 0, 0, 1920, 1080, 3, 3, 3);
+  fill_v(&d, 0, 0, 1920, 1080, 12, 13, 16);
 
   if (g_player_ui && now) {
     char a[16], b[16];
@@ -498,179 +520,178 @@ static void paint(void) {
     int pos = (int)player_position();
     int w = 0;
     if (dur < 1) dur = now->seconds;
-    fill_v(&d, 0, 0, 1920, 1080, 0, 0, 0);
-    draw_cover(&d, 750, 80, 420, now->title, 0);
-    fit(line, (int)sizeof line, now->title, 5, 1400);
-    draw_text(&d, (1920 - text_px(line, 5)) / 2, 530, 5, 255, 255, 255, line);
-    fit(line, (int)sizeof line, now->artist, 3, 1000);
-    draw_text(&d, (1920 - text_px(line, 3)) / 2, 590, 3, 170, 170, 170, line);
-    draw_text(&d, 860, 650, 2, library_has(now->id) ? 255 : 160, library_has(now->id) ? 0 : 160,
-              library_has(now->id) ? 0 : 160, library_has(now->id) ? "Liked" : "Like");
-    fill_v(&d, 360, 720, 1200, 4, 70, 70, 70);
+    fill_v(&d, 0, 0, 1920, 1080, 8, 9, 12);
+    draw_cover(&d, 780, 96, 360, now->title, 0);
+    fit(line, (int)sizeof line, now->title, 2, 1500);
+    draw_text(&d, (1920 - text_px(line, 2)) / 2, 500, 2, 244, 242, 236, line);
+    fit(line, (int)sizeof line, now->artist, 1, 1200);
+    draw_text(&d, (1920 - text_px(line, 1)) / 2, 575, 1, 168, 170, 180, line);
+    draw_text(&d, (1920 - text_px(library_has(now->id) ? "Saved on this console" : "Square saves this song", 1)) / 2,
+              630, 1, library_has(now->id) ? 212 : 150, library_has(now->id) ? 166 : 152,
+              library_has(now->id) ? 86 : 140,
+              library_has(now->id) ? "Saved on this console" : "Square saves this song");
+    fill_v(&d, 360, 700, 1200, 8, 40, 42, 52);
     if (dur > 0) {
       w = (int)(1200.0 * (pos / (double)dur));
       if (w < 0) w = 0;
       if (w > 1200) w = 1200;
-      fill_v(&d, 360, 720, w, 4, 255, 255, 255);
+      fill_v(&d, 360, 700, w, 8, 212, 166, 86);
     }
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);
-    draw_text(&d, 360, 736, 2, 168, 168, 168, a);
-    draw_text(&d, 1480, 736, 2, 168, 168, 168, b);
-    draw_disc(&d, 960, 840, 36, 255, 255, 255);
-    draw_text(&d, 948, 824, 3, 0, 0, 0, player_paused() ? "II" : ">");
-    draw_text(&d, 820, 824, 3, 220, 220, 220, "|<");
-    draw_text(&d, 1060, 824, 3, 220, 220, 220, ">|");
-    snprintf(line, sizeof line, "vol %d    %s", player_volume(),
-             g_repeat == REP_ONE ? "repeat one" : g_repeat == REP_ALL ? "repeat all" : "repeat off");
-    draw_text(&d, 760, 910, 2, 140, 140, 140, line);
-    if (player_error()[0]) {
-      fit(line, (int)sizeof line, player_error(), 2, 1200);
-      draw_text(&d, 360, 960, 2, 255, 80, 80, line);
+    draw_text(&d, 360, 720, 1, 168, 170, 180, a);
+    draw_text(&d, 1560 - text_px(b, 1), 720, 1, 168, 170, 180, b);
+    snprintf(line, sizeof line, "%s     vol %d     %s", player_paused() ? "Paused" : "Playing",
+             player_volume(),
+             g_repeat == REP_ONE ? "Repeat one" : g_repeat == REP_ALL ? "Repeat all" : "Repeat off");
+    draw_text(&d, (1920 - text_px(line, 1)) / 2, 790, 1, 196, 198, 206, line);
+    if (g_status[0]) {
+      fit(line, (int)sizeof line, g_status, 1, 1400);
+      draw_text(&d, (1920 - text_px(line, 1)) / 2, 850, 1, 232, 120, 96, line);
+    } else if (player_error()[0]) {
+      fit(line, (int)sizeof line, player_error(), 1, 1400);
+      draw_text(&d, (1920 - text_px(line, 1)) / 2, 850, 1, 232, 120, 96, line);
     }
-    present();
+    draw_hints(&d);
+    present(&d);
     return;
   }
 
-  fill_v(&d, 0, 0, RAIL, BOTTOM, 0, 0, 0);
-  fill_v(&d, 28, 28, 36, 36, 255, 0, 0);
-  draw_text(&d, 38, 36, 2, 255, 255, 255, ">");
-  draw_text(&d, 76, 32, 2, 255, 255, 255, "YouTube");
-  draw_text(&d, 76, 52, 2, 255, 255, 255, "Music");
+  fill_v(&d, 0, 0, RAIL, BAR_Y, 18, 19, 24);
+  fill_v(&d, RAIL - 2, 0, 2, BAR_Y, 36, 38, 48);
+  draw_disc(&d, 40, 52, 12, 212, 166, 86);
+  draw_text(&d, 64, 22, 1, 244, 242, 236, "YouTube");
+  draw_text(&d, 64, 54, 1, 168, 170, 180, "Music");
 
   for (int i = 0; i < 3; i++) {
-    int y = 140 + i * 72;
+    int y = 150 + i * 78;
     int on = (g_nav == i);
-    if (on && g_zone == ZONE_NAV) fill_v(&d, 16, y - 10, RAIL - 32, 52, 28, 28, 28);
-    draw_text(&d, 36, y, 3, on ? 255 : 168, on ? 255 : 168, on ? 255 : 168, nav_name[i]);
+    if (on) {
+      fill_v(&d, 0, y - 8, 6, 52, 212, 166, 86);
+      if (g_zone == ZONE_NAV) fill_v(&d, 16, y - 8, RAIL - 32, 52, 32, 34, 44);
+    }
+    draw_text(&d, 36, y, 1, on ? 244 : 150, on ? 242 : 152, on ? 236 : 164, nav_name[i]);
   }
   {
     int on = (g_nav == NAV_QUIT);
-    if (on && g_zone == ZONE_NAV) fill_v(&d, 16, 880, RAIL - 32, 44, 28, 28, 28);
-    draw_text(&d, 36, 890, 2, on ? 255 : 110, on ? 255 : 110, on ? 255 : 110, "Quit");
+    if (on && g_zone == ZONE_NAV) fill_v(&d, 16, BAR_Y - 78, RAIL - 32, 52, 32, 34, 44);
+    if (on) fill_v(&d, 0, BAR_Y - 78, 6, 52, 212, 166, 86);
+    draw_text(&d, 36, BAR_Y - 70, 1, on ? 244 : 120, on ? 242 : 122, on ? 236 : 132, "Quit");
   }
 
   if (g_body == BODY_HOME) {
     int pill = (g_zone == ZONE_BODY && g_home < 0);
     const char *hint = g_status[0] ? g_status : "Search songs, albums, artists";
-    if (pill) fill_v(&d, RAIL + 28, 28, 1500, 56, 255, 255, 255);
-    else fill_v(&d, RAIL + 28, 28, 1500, 56, 33, 33, 33);
-    fit(line, (int)sizeof line, hint, 2, 1440);
-    draw_text(&d, RAIL + 52, 44, 2, pill ? 20 : (g_status[0] ? 255 : 150), pill ? 20 : 150,
-              pill ? 20 : 150, line);
-    draw_text(&d, RAIL + 36, 112, 3, 255, 255, 255, "Mixed for you");
-    draw_text(&d, RAIL + 36, 430, 3, 255, 255, 255, "Moods & genres");
+    fill_v(&d, RAIL + 28, 24, 1560, 64, pill ? 244 : 28, pill ? 242 : 30, pill ? 236 : 38);
+    fit(line, (int)sizeof line, hint, 1, 1500);
+    draw_text(&d, RAIL + 48, 38, 1, pill ? 20 : (g_status[0] ? 232 : 150), pill ? 18 : (g_status[0] ? 120 : 152),
+              pill ? 16 : (g_status[0] ? 96 : 164), line);
+    draw_text(&d, RAIL + 28, 112, 1, 244, 242, 236, "Shelves");
     for (int i = 0; i < 8; i++) {
       int col = i % 4;
       int row = i / 4;
-      int x = RAIL + 36 + col * 390;
-      int y = row == 0 ? 164 : 482;
+      int x = RAIL + 28 + col * 390;
+      int y = row == 0 ? 160 : 480;
       int sel = (g_zone == ZONE_BODY && g_home == i);
-      draw_cover(&d, x, y, 200, moods[i][0], sel);
-      draw_text(&d, x, y + 212, 2, 255, 255, 255, moods[i][0]);
-      draw_text(&d, x, y + 234, 2, 150, 150, 150, "Station");
+      int cr, cg, cb;
+      cover_rgb(moods[i][0], &cr, &cg, &cb);
+      if (sel) fill_v(&d, x - 4, y - 4, 368, 308, 212, 166, 86);
+      fill_v(&d, x, y, 360, 300, 24, 26, 34);
+      fill_v(&d, x, y, 360, 8, cr, cg, cb);
+      draw_cover(&d, x + 96, y + 36, 168, moods[i][0], 0);
+      draw_text(&d, x + 24, y + 220, 1, 244, 242, 236, moods[i][0]);
+      draw_text(&d, x + 24, y + 252, 1, 150, 152, 164, "X plays this shelf");
     }
   } else if (g_body == BODY_SEARCH) {
-    fill_v(&d, RAIL + 28, 28, 1500, 56, 33, 33, 33);
-    fit(line, (int)sizeof line, g_query[0] ? g_query : "Search songs, albums, artists", 3, 1440);
-    draw_text(&d, RAIL + 52, 42, 3, g_query[0] ? 255 : 140, g_query[0] ? 255 : 140, g_query[0] ? 255 : 140,
-              line);
-    fill_v(&d, RAIL + 36, 108, 140, 36, 255, 255, 255);
-    draw_text(&d, RAIL + 56, 116, 2, 0, 0, 0, "Songs");
-    draw_text(&d, RAIL + 200, 116, 2, 180, 180, 180, "Albums");
-    draw_text(&d, RAIL + 340, 116, 2, 180, 180, 180, "Artists");
-    draw_text(&d, RAIL + 490, 116, 2, 180, 180, 180, "Playlists");
+    fill_v(&d, RAIL + 28, 24, 1560, 64, 28, 30, 38);
+    fit(line, (int)sizeof line, g_query[0] ? g_query : "Search songs, albums, artists", 1, 1500);
+    draw_text(&d, RAIL + 48, 38, 1, g_query[0] ? 244 : 140, g_query[0] ? 242 : 142, g_query[0] ? 236 : 154, line);
     for (int r = 0; r < 5; r++) {
       int cols = key_cols(r);
-      int indent = r == 2 ? 54 : r == 3 ? 108 : 0;
+      int indent = r == 2 ? 48 : r == 3 ? 96 : 0;
       for (int c = 0; c < cols; c++) {
-        int x = RAIL + 36 + indent + c * (r == 4 ? 250 : 112);
-        int y = 180 + r * 96;
+        int x = RAIL + 28 + indent + c * (r == 4 ? 280 : 118);
+        int y = 120 + r * 100;
         int sel = (g_zone == ZONE_BODY && g_keyr == r && g_keyc == c);
         char lab[8];
-        fill_v(&d, x, y, r == 4 ? 230 : 100, 80, sel ? 255 : 40, sel ? 255 : 40, sel ? 255 : 40);
+        int kw = r == 4 ? 250 : 104;
+        fill_v(&d, x, y, kw, 84, sel ? 244 : 32, sel ? 242 : 34, sel ? 236 : 44);
         if (r < 4) {
           lab[0] = krow[r][c];
           lab[1] = 0;
-          draw_text(&d, x + 34, y + 24, 4, sel ? 0 : 255, sel ? 0 : 255, sel ? 0 : 255, lab);
+          draw_text(&d, x + (kw - text_px(lab, 1)) / 2, y + 24, 1, sel ? 16 : 244, sel ? 16 : 242,
+                    sel ? 18 : 236, lab);
         } else {
-          draw_text(&d, x + 24, y + 28, 2, sel ? 0 : 255, sel ? 0 : 255, sel ? 0 : 255, specials[c]);
+          draw_text(&d, x + 28, y + 24, 1, sel ? 16 : 244, sel ? 16 : 242, sel ? 18 : 236, specials[c]);
         }
       }
     }
     if (g_status[0]) {
-      fit(line, (int)sizeof line, g_status, 2, 1400);
-      draw_text(&d, RAIL + 36, 680, 2, 255, 120, 120, line);
+      fit(line, (int)sizeof line, g_status, 1, 1400);
+      draw_text(&d, RAIL + 28, 640, 1, 232, 120, 96, line);
     }
   } else {
     Track *list = g_body == BODY_LIBRARY ? g_likes : g_results;
     int n = g_body == BODY_LIBRARY ? g_nlikes : g_nresults;
     const char *heading = g_body == BODY_LIBRARY ? "Library" : (g_list_title[0] ? g_list_title : "Songs");
-    const int vis = 8;
-    fit(line, (int)sizeof line, heading, 5, 1100);
-    draw_text(&d, RAIL + 36, 36, 5, 255, 255, 255, line);
-    draw_disc(&d, RAIL + 1280, 56, 26, 255, 0, 0);
-    draw_text(&d, RAIL + 1270, 44, 3, 255, 255, 255, ">");
-    draw_text(&d, RAIL + 1320, 44, 2, 255, 255, 255, "Play");
-    if (g_body == BODY_LIBRARY) {
-      fill_v(&d, RAIL + 36, 100, 120, 32, 255, 255, 255);
-      draw_text(&d, RAIL + 52, 108, 2, 0, 0, 0, "Songs");
-    }
+    const int vis = 6;
+    fit(line, (int)sizeof line, heading, 2, 1200);
+    draw_text(&d, RAIL + 28, 28, 2, 244, 242, 236, line);
     if (n == 0) {
-      draw_text(&d, RAIL + 36, 180, 3, 170, 170, 170,
-                g_body == BODY_LIBRARY ? "Songs you like show up here." : "No songs for that search.");
+      draw_text(&d, RAIL + 28, 160, 1, 168, 170, 180,
+                g_body == BODY_LIBRARY ? "Songs you save show up here." : "No songs for that search.");
     }
     for (int i = 0; i < vis && g_scroll + i < n; i++) {
       int idx = g_scroll + i;
-      int y = 150 + i * 96;
+      int y = 130 + i * 120;
       int sel = (g_zone == ZONE_BODY && g_sel == idx);
       char time[16];
-      if (sel) fill_v(&d, RAIL + 20, y - 8, 1580, 88, 33, 33, 33);
-      draw_cover(&d, RAIL + 36, y, 64, list[idx].title, 0);
-      fit(line, (int)sizeof line, list[idx].title, 3, 980);
-      draw_text(&d, RAIL + 120, y + 6, 3, 255, 255, 255, line);
-      fit(line, (int)sizeof line, list[idx].artist, 2, 700);
-      draw_text(&d, RAIL + 120, y + 38, 2, 170, 170, 170, line);
-      if (library_has(list[idx].id)) draw_text(&d, RAIL + 1280, y + 20, 2, 255, 0, 0, "Liked");
+      if (sel) fill_v(&d, RAIL + 16, y - 8, 1588, 108, 32, 34, 44);
+      if (sel) fill_v(&d, RAIL + 16, y - 8, 6, 108, 212, 166, 86);
+      draw_cover(&d, RAIL + 36, y, 84, list[idx].title, 0);
+      fit(line, (int)sizeof line, list[idx].title, 1, 980);
+      draw_text(&d, RAIL + 140, y + 8, 1, 244, 242, 236, line);
+      fit(line, (int)sizeof line, list[idx].artist, 1, 760);
+      draw_text(&d, RAIL + 140, y + 46, 1, 150, 152, 164, line);
+      if (library_has(list[idx].id)) draw_text(&d, RAIL + 1180, y + 24, 1, 212, 166, 86, "Saved");
       if (list[idx].seconds > 0) {
         fmt_time(time, (int)sizeof time, list[idx].seconds);
-        draw_text(&d, RAIL + 1460, y + 20, 2, 170, 170, 170, time);
+        draw_text(&d, RAIL + 1420, y + 24, 1, 150, 152, 164, time);
       }
     }
   }
 
-  fill_v(&d, 0, BOTTOM, 1920, 1080 - BOTTOM, 33, 33, 33);
+  fill_v(&d, 0, BAR_Y, 1920, HINT_Y - BAR_Y, 22, 23, 30);
+  fill_v(&d, 0, BAR_Y, 1920, 2, 48, 50, 60);
   if (now) {
     char a[16], b[16];
     int dur = (int)player_duration();
     int pos = (int)player_position();
     if (dur < 1) dur = now->seconds;
-    draw_cover(&d, 16, BOTTOM + 22, 64, now->title, 0);
-    fit(line, (int)sizeof line, now->title, 2, 420);
-    draw_text(&d, 96, BOTTOM + 28, 2, 255, 255, 255, line);
-    fit(line, (int)sizeof line, now->artist, 2, 420);
-    draw_text(&d, 96, BOTTOM + 52, 2, 170, 170, 170, line);
-    draw_text(&d, 620, BOTTOM + 36, 2, 200, 200, 200, "|<");
-    draw_disc(&d, 760, BOTTOM + 48, 22, 255, 255, 255);
-    draw_text(&d, 750, BOTTOM + 36, 2, 0, 0, 0, player_paused() ? "II" : ">");
-    draw_text(&d, 860, BOTTOM + 36, 2, 200, 200, 200, ">|");
+    draw_cover(&d, 20, BAR_Y + 14, 72, now->title, 0);
+    fit(line, (int)sizeof line, now->title, 1, 460);
+    draw_text(&d, 108, BAR_Y + 16, 1, 244, 242, 236, line);
+    fit(line, (int)sizeof line, now->artist, 1, 460);
+    draw_text(&d, 108, BAR_Y + 52, 1, 150, 152, 164, line);
+    draw_text(&d, 620, BAR_Y + 32, 1, 196, 198, 206, player_paused() ? "Paused" : "Playing");
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);
-    draw_text(&d, 980, BOTTOM + 20, 2, 160, 160, 160, a);
-    fill_v(&d, 1080, BOTTOM + 28, 480, 4, 90, 90, 90);
+    draw_text(&d, 820, BAR_Y + 16, 1, 168, 170, 180, a);
+    fill_v(&d, 940, BAR_Y + 36, 620, 6, 48, 50, 60);
     if (dur > 0) {
-      int w = (int)(480.0 * (pos / (double)dur));
+      int w = (int)(620.0 * (pos / (double)dur));
       if (w < 0) w = 0;
-      if (w > 480) w = 480;
-      fill_v(&d, 1080, BOTTOM + 28, w, 4, 255, 255, 255);
+      if (w > 620) w = 620;
+      fill_v(&d, 940, BAR_Y + 36, w, 6, 212, 166, 86);
     }
-    draw_text(&d, 1580, BOTTOM + 20, 2, 160, 160, 160, b);
+    draw_text(&d, 1580, BAR_Y + 16, 1, 168, 170, 180, b);
     snprintf(line, sizeof line, "vol %d", player_volume());
-    draw_text(&d, 1720, BOTTOM + 36, 2, 180, 180, 180, line);
+    draw_text(&d, 1720, BAR_Y + 32, 1, 168, 170, 180, line);
   } else {
-    draw_text(&d, 36, BOTTOM + 40, 2, 150, 150, 150, "Nothing playing");
+    draw_text(&d, 28, BAR_Y + 32, 1, 150, 152, 164, "Nothing playing");
   }
-  present();
+  draw_hints(&d);
+  present(&d);
 }
 
 static int edge(SDL_GameControllerButton b) {
@@ -804,9 +825,16 @@ int main(int argc, char **argv) {
     park_err(wh);
   }
   SDL_StartTextInput();
-  if (player_open(err, (int)sizeof err) != 0) set_status(err);
-  if (net_init(err, (int)sizeof err) != 0) set_status(err);
-  else set_status("Pick a shelf, or Options to search.");
+  if (player_open(err, (int)sizeof err) != 0) {
+    set_status(err);
+    toast(err);
+  }
+  if (net_init(err, (int)sizeof err) != 0) {
+    set_status(err);
+    toast(err);
+  } else if (!g_status[0]) {
+    set_status("Pick a shelf. X plays it.");
+  }
   library_load();
 
   while (g_run) {

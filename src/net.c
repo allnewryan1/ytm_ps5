@@ -199,7 +199,9 @@ void net_shutdown(void) {
   g_tmpl = g_http = g_ssl = g_net = -1;
 }
 
-static int http_post(const char *url, const char *body, int *status, char *err, int err_n) {
+static int http_post_ex(const char *url, const char *body, const char *ua, const char *origin,
+                         const char *referer, const char *client_name, const char *client_ver,
+                         int *status, char *err, int err_n) {
   int req;
   int total = 0;
   int n;
@@ -216,8 +218,13 @@ static int http_post(const char *url, const char *body, int *status, char *err, 
   }
   sceHttp2AddRequestHeader(req, "Content-Type", "application/json", SCE_HTTP_HEADER_OVERWRITE);
   sceHttp2AddRequestHeader(req, "Accept", "application/json", SCE_HTTP_HEADER_OVERWRITE);
-  sceHttp2AddRequestHeader(req, "Origin", "https://music.youtube.com", SCE_HTTP_HEADER_OVERWRITE);
-  sceHttp2AddRequestHeader(req, "Referer", "https://music.youtube.com/", SCE_HTTP_HEADER_OVERWRITE);
+  if (ua) sceHttp2AddRequestHeader(req, "User-Agent", ua, SCE_HTTP_HEADER_OVERWRITE);
+  if (origin) sceHttp2AddRequestHeader(req, "Origin", origin, SCE_HTTP_HEADER_OVERWRITE);
+  if (referer) sceHttp2AddRequestHeader(req, "Referer", referer, SCE_HTTP_HEADER_OVERWRITE);
+  if (client_name)
+    sceHttp2AddRequestHeader(req, "X-YouTube-Client-Name", client_name, SCE_HTTP_HEADER_OVERWRITE);
+  if (client_ver)
+    sceHttp2AddRequestHeader(req, "X-YouTube-Client-Version", client_ver, SCE_HTTP_HEADER_OVERWRITE);
   if (sceHttp2SendRequest(req, body, body_n) != 0) {
     sceHttp2DeleteRequest(req);
     snprintf(err, (size_t)err_n, "HTTP send failed");
@@ -241,6 +248,11 @@ static int http_post(const char *url, const char *body, int *status, char *err, 
   }
   err[0] = 0;
   return total;
+}
+
+static int http_post(const char *url, const char *body, int *status, char *err, int err_n) {
+  return http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
+                      NULL, NULL, status, err, err_n);
 }
 
 static int collect_tracks(const char *json, Track *out, int max) {
@@ -332,6 +344,7 @@ static const char *url_near(const char *mime, const char *json) {
   const char *from = json;
   const char *q;
   const char *found = NULL;
+  /* This player response puts "url" just before "mimeType" in the same object. */
   if (mime - json > 1800) from = mime - 1800;
   q = from;
   while ((q = strstr(q, "\"url\":\"")) != NULL && q < mime) {
@@ -344,86 +357,84 @@ static const char *url_near(const char *mime, const char *json) {
   return NULL;
 }
 
+static int nearby_int(const char *p, const char *key, int window) {
+  char pat[40];
+  const char *q;
+  const char *end = p + window;
+  snprintf(pat, sizeof pat, "\"%s\":", key);
+  q = strstr(p, pat);
+  if (!q || q >= end) return 0;
+  q += strlen(pat);
+  while (*q == ' ') q++;
+  return atoi(q);
+}
+
 static int pick_audio_url(const char *json, char *url, int url_n) {
   const char *p = json;
-  char fallback[4096];
-  fallback[0] = 0;
-  while ((p = strstr(p, "\"mimeType\":\"audio/")) != NULL) {
-    int mp4 = strncmp(p, "\"mimeType\":\"audio/mp4", 22) == 0;
+  int best = -1;
+  while ((p = strstr(p, "\"mimeType\":\"audio/mp4")) != NULL) {
+    int rate = nearby_int(p, "bitrate", 240);
     const char *raw = url_near(p, json);
-    if (raw) {
+    if (raw && rate >= best) {
       char decoded[4096];
       copy_json_str(raw, decoded, (int)sizeof decoded);
       if (strncmp(decoded, "https://", 8) == 0 && strstr(decoded, "googlevideo.com")) {
-        if (mp4) {
-          snprintf(url, (size_t)url_n, "%s", decoded);
-          return 1;
-        }
-        if (!fallback[0]) snprintf(fallback, sizeof fallback, "%s", decoded);
+        snprintf(url, (size_t)url_n, "%s", decoded);
+        best = rate > 0 ? rate : 0;
       }
     }
-    p += 18;
+    p += 22;
   }
-  if (fallback[0]) {
-    snprintf(url, (size_t)url_n, "%s", fallback);
-    return 1;
-  }
-  return 0;
+  return best >= 0;
 }
 
 int ytm_audio_url(const char *video_id, char *url, int url_n, int *duration,
                   char *err, int err_n) {
-  static const char *names[] = {"ANDROID_MUSIC", "ANDROID", "IOS"};
-  static const char *vers[] = {"7.27.52", "19.44.38", "19.45.4"};
-  static const int android[] = {1, 1, 0};
-  char body[640];
+  /* visionOS Innertube still returns a direct AAC URL without a proof-of-origin
+   * token. Android and iOS clients now answer with a cipher or a sign-in wall. */
+  static const char *ua =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 "
+      "(KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+  char body[1024];
   char endpoint[320];
   int status = 0;
+  int len = 0;
   *duration = 0;
   url[0] = 0;
   snprintf(endpoint, sizeof endpoint,
-           "https://music.youtube.com/youtubei/v1/player?key=%s&prettyPrint=false",
-           INNERTUBE_KEY);
-
-  for (int i = 0; i < 3; i++) {
-    int len = 0;
-    if (android[i]) {
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"%s\","
-               "\"clientVersion\":\"%s\",\"androidSdkVersion\":30,"
-               "\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"%s\","
-               "\"contentCheckOk\":true,\"racyCheckOk\":true}",
-               names[i], vers[i], video_id);
-    } else {
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"%s\","
-               "\"clientVersion\":\"%s\",\"deviceModel\":\"iPhone16,2\","
-               "\"hl\":\"en\",\"gl\":\"US\"}},\"videoId\":\"%s\","
-               "\"contentCheckOk\":true,\"racyCheckOk\":true}",
-               names[i], vers[i], video_id);
-    }
-    if (http_post(endpoint, body, &status, err, err_n) < 0) continue;
-    json_int(g_resp, "lengthSeconds", &len);
-    if (len <= 0) {
-      int ms = 0;
-      if (json_int(g_resp, "approxDurationMs", &ms) && ms > 0) len = ms / 1000;
-    }
-    if (pick_audio_url(g_resp, url, url_n)) {
-      *duration = len;
-      err[0] = 0;
-      return 0;
-    }
-    if (strstr(g_resp, "signatureCipher") || strstr(g_resp, "\"signature\":\"") ) {
-      snprintf(err, (size_t)err_n, "YouTube signed this stream; no direct audio URL");
-    } else if (strstr(g_resp, "LOGIN_REQUIRED")) {
-      snprintf(err, (size_t)err_n, "YouTube asked this console to sign in");
-    } else {
-      char reason[160];
-      if (json_string(g_resp, "reason", reason, (int)sizeof reason))
-        snprintf(err, (size_t)err_n, "%s", reason);
-      else
-        snprintf(err, (size_t)err_n, "No audio URL in the player response");
-    }
+           "https://www.youtube.com/youtubei/v1/player?prettyPrint=false");
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"VISIONOS\","
+           "\"clientVersion\":\"1.02\",\"deviceMake\":\"Apple\","
+           "\"deviceModel\":\"RealityDevice17,1\",\"osName\":\"visionOS\","
+           "\"osVersion\":\"26.5.23O471\",\"hl\":\"en\",\"gl\":\"US\","
+           "\"userAgent\":\"%s\"}},\"videoId\":\"%s\","
+           "\"contentCheckOk\":true,\"racyCheckOk\":true}",
+           ua, video_id);
+  if (http_post_ex(endpoint, body, ua, "https://www.youtube.com", "https://www.youtube.com/",
+                   "101", "1.02", &status, err, err_n) < 0) {
+    return -1;
+  }
+  json_int(g_resp, "lengthSeconds", &len);
+  if (len <= 0) {
+    int ms = 0;
+    if (json_int(g_resp, "approxDurationMs", &ms) && ms > 0) len = ms / 1000;
+  }
+  if (pick_audio_url(g_resp, url, url_n)) {
+    *duration = len;
+    err[0] = 0;
+    return 0;
+  }
+  if (strstr(g_resp, "signatureCipher") || strstr(g_resp, "\"signature\":\"")) {
+    snprintf(err, (size_t)err_n, "YouTube signed this stream; no direct audio URL");
+  } else if (strstr(g_resp, "LOGIN_REQUIRED")) {
+    snprintf(err, (size_t)err_n, "YouTube asked this console to sign in");
+  } else {
+    char reason[160];
+    if (json_string(g_resp, "reason", reason, (int)sizeof reason))
+      snprintf(err, (size_t)err_n, "%s", reason);
+    else
+      snprintf(err, (size_t)err_n, "No audio URL in the player response");
   }
   return -1;
 }
