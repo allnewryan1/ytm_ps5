@@ -15,3 +15,6 @@
 - Pressing X on a shelf starts that shelf. Audio is a direct AAC stream from the visionOS player client.
 - If playback cannot start, the reason is shown as a notification as well as on screen.
 - The interface uses a plain sans-serif face, and the bottom edge lists the controller buttons.
+- Account sign-in uses YouTube's TV device code. Open google.com/device, enter the code, and liked songs load for that account. The sign-in is stored on the console.
+- Options opens search. The touchpad cycles repeat.
+- While the player has focus, a gold outline and a "Controlling the player" label show that playback is what the pad is driving. The side rail names the current section.
