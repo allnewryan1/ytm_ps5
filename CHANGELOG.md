@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Songs download as a file and then play, so a redirect from the audio host is followed before the decoder opens the stream. If the file is too large, playback falls back to the stream URL.
+- Covers prefer a 720-wide photo and are kept at 360 pixels, instead of a small thumbnail blown up on screen.
+- Triangle opens Now Playing. The queue is the list on the right of that card. Up and down move through it, X plays the highlighted song, and L2 and R2 change the volume.
+- Repeat is a light disc with a dark loop: arrows for repeat all, a 1 for repeat one, and a slash for off.
+- For you is two columns. Quick play is individual songs. Playlists are the mixes, with the artist line shortened so both columns fit.
+
 ## 0.2.0
 
 - Up next is a queue. Triangle opens it, X plays the highlighted row, and the bar shows how many songs remain.

@@ -24,6 +24,8 @@ int sceHttp2AddRequestHeader(int, const char *, const char *, unsigned int);
 int sceHttp2SendRequest(int, const void *, size_t);
 int sceHttp2GetStatusCode(int, int *);
 int sceHttp2ReadData(int, void *, size_t);
+int sceHttp2SetAutoRedirect(int, int);
+int sceHttp2GetAllResponseHeaders(int, char **, size_t *);
 
 #define SCE_HTTP_HEADER_OVERWRITE 0u
 
@@ -38,8 +40,8 @@ static int g_http = -1;
 static int g_tmpl = -1;
 static char *g_resp;
 
-#define COVER_SIDE 128
-#define COVER_SLOTS 36
+#define COVER_SIDE 360
+#define COVER_SLOTS 20
 typedef struct {
   char key[80];
   unsigned char *px;
@@ -256,6 +258,7 @@ int net_init(char *err, int err_n) {
     snprintf(err, (size_t)err_n, "sceHttp2CreateTemplate %d", g_tmpl);
     return -1;
   }
+  sceHttp2SetAutoRedirect(g_tmpl, 1);
   err[0] = 0;
   return 0;
 }
@@ -423,16 +426,16 @@ static void store_thumb(Track *t, const char *url) {
   const char *eq;
   int n;
   if (t->id[0]) {
-    snprintf(t->thumb, sizeof t->thumb, "https://i.ytimg.com/vi/%s/mqdefault.jpg", t->id);
+    snprintf(t->thumb, sizeof t->thumb, "https://i.ytimg.com/vi/%s/hq720.jpg", t->id);
     return;
   }
   if (!url || !url[0]) return;
   eq = strstr(url, "=w");
   if (!eq) eq = strstr(url, "=s");
-  if (eq && (int)(eq - url) < (int)sizeof t->thumb - 18) {
+  if (eq && (int)(eq - url) < (int)sizeof t->thumb - 20) {
     n = (int)(eq - url);
     memcpy(t->thumb, url, (size_t)n);
-    snprintf(t->thumb + n, sizeof t->thumb - (size_t)n, "=w240-h240-rj");
+    snprintf(t->thumb + n, sizeof t->thumb - (size_t)n, "=w720-h720-l90-rj");
     return;
   }
   if ((int)strlen(url) < (int)sizeof t->thumb) snprintf(t->thumb, sizeof t->thumb, "%s", url);
@@ -1180,30 +1183,77 @@ int ytm_liked(Track *out, int max, char *err, int err_n) {
   return n;
 }
 
-int ytm_home(Track *out, int max, char *err, int err_n) {
+static int keep_ids(Track *a, int n) {
+  int i, w = 0;
+  for (i = 0; i < n; i++) {
+    if (a[i].id[0]) a[w++] = a[i];
+  }
+  return w;
+}
+
+static int keep_mixes(Track *a, int n) {
+  int i, w = 0;
+  for (i = 0; i < n; i++) {
+    if (!a[i].id[0] && a[i].browse[0]) a[w++] = a[i];
+  }
+  return w;
+}
+
+int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max, int *nmixes,
+            char *err, int err_n) {
   char body[640];
   char url[256];
   int status = 0;
   int n;
   int authed = 0;
+  int got = 0;
+  if (nsongs) *nsongs = 0;
+  if (nmixes) *nmixes = 0;
+  if (!songs || !mixes || song_max < 1 || mix_max < 1) return -1;
   if (g_refresh[0] && ensure_access(err, err_n) == 0) authed = 1;
   if (authed) {
-    n = tv_browse("FEmusic_home", out, max, err, err_n);
-    if (n > 0) return n;
+    snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false");
+    snprintf(body, sizeof body,
+             "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
+             "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},"
+             "\"browseId\":\"FEmusic_home\"}",
+             TV_VER);
+    if (http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
+                     TV_VER, 1, 1, &status, err, err_n) > 0 &&
+        status == 200 && g_resp && g_resp[0])
+      got = 1;
   }
-  snprintf(url, sizeof url,
-           "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
-  snprintf(body, sizeof body,
-           "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-           "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
-           "\"browseId\":\"FEmusic_home\"}");
-  if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
-                   NULL, NULL, 0, 0, &status, err, err_n) < 0)
+  if (!got) {
+    snprintf(url, sizeof url,
+             "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
+    snprintf(body, sizeof body,
+             "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+             "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
+             "\"browseId\":\"FEmusic_home\"}");
+    if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
+                     NULL, NULL, 0, 0, &status, err, err_n) < 0)
+      return -1;
+  }
+  n = 0;
+  walk_kind(g_resp, "\"musicResponsiveListItemRenderer\":", songs, &n, song_max, parse_mrlir);
+  walk_kind(g_resp, "\"musicCardShelfRenderer\":", songs, &n, song_max, parse_card);
+  walk_kind(g_resp, "\"tileRenderer\":", songs, &n, song_max, parse_tile);
+  n = keep_ids(songs, n);
+  *nsongs = n;
+  n = 0;
+  walk_kind(g_resp, "\"musicTwoRowItemRenderer\":", mixes, &n, mix_max, parse_two);
+  n = keep_mixes(mixes, n);
+  *nmixes = n;
+  if (*nsongs == 0) {
+    n = remix_browse("VLPL4fGSI1pDJn4yCNzulPkUbxgr4pl0gmI-", 0, songs, song_max, err, err_n);
+    if (n > 0) *nsongs = keep_ids(songs, n);
+  }
+  if (*nsongs + *nmixes == 0) {
+    if (!err[0]) snprintf(err, (size_t)err_n, "No recommendations");
     return -1;
-  n = collect_tracks(g_resp, out, max);
-  if (n == 0) snprintf(err, (size_t)err_n, "No recommendations");
-  else err[0] = 0;
-  return n;
+  }
+  err[0] = 0;
+  return 0;
 }
 
 #define PRE_SLOTS 4
@@ -1261,24 +1311,127 @@ void ytm_prefetch_drop(const char *video_id) {
   slot->url[0] = 0;
 }
 
+static char g_pending[8192];
+#define AUDIO_CAP (24 * 1024 * 1024)
+
+static int http_get_hdr(const char *url, unsigned char *buf, int cap, int *status, const char *ua,
+                        const char *ref);
+
 static int http_get_bin(const char *url, unsigned char *buf, int cap, int *status) {
-  int req, total = 0, n;
-  if (!buf || cap < 8 || g_tmpl < 0) return -1;
-  req = sceHttp2CreateRequestWithURL(g_tmpl, "GET", url, 0);
-  if (req < 0) return -1;
-  sceHttp2AddRequestHeader(req, "Accept", "image/jpeg,image/*;q=0.8", SCE_HTTP_HEADER_OVERWRITE);
-  sceHttp2AddRequestHeader(req, "User-Agent", "Mozilla/5.0", SCE_HTTP_HEADER_OVERWRITE);
-  if (sceHttp2SendRequest(req, "", 0) != 0) {
-    sceHttp2DeleteRequest(req);
-    return -1;
+  return http_get_hdr(url, buf, cap, status, NULL, NULL);
+}
+
+static int starts_location(const char *p, const char *end) {
+  static const char *k = "location:";
+  int i;
+  for (i = 0; k[i]; i++) {
+    char c;
+    if (p + i >= end) return 0;
+    c = p[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c != k[i]) return 0;
   }
-  *status = 0;
-  sceHttp2GetStatusCode(req, status);
-  while (total + 1 < cap &&
-         (n = sceHttp2ReadData(req, buf + total, (size_t)(cap - total - 1))) > 0)
-    total += n;
-  sceHttp2DeleteRequest(req);
-  return total;
+  return 1;
+}
+
+static int header_location(int req, char *dst, int n) {
+  char *hdr = NULL;
+  size_t len = 0;
+  const char *p;
+  const char *e;
+  dst[0] = 0;
+  if (n < 8) return -1;
+  if (sceHttp2GetAllResponseHeaders(req, &hdr, &len) != 0 || !hdr || len == 0) return -1;
+  p = hdr;
+  e = hdr + len;
+  while (p < e) {
+    const char *nl = p;
+    int k;
+    while (nl < e && *nl != '\n') nl++;
+    if (starts_location(p, nl)) {
+      const char *v = p + 9;
+      while (v < nl && (*v == ' ' || *v == '\t')) v++;
+      k = (int)(nl - v);
+      while (k > 0 && (v[k - 1] == '\r' || v[k - 1] == ' ')) k--;
+      if (k < 8 || k >= n) return -1;
+      memcpy(dst, v, (size_t)k);
+      dst[k] = 0;
+      return 0;
+    }
+    p = nl < e ? nl + 1 : e;
+  }
+  return -1;
+}
+
+static int http_get_hdr(const char *url, unsigned char *buf, int cap, int *status, const char *ua,
+                        const char *ref) {
+  char cur[8192];
+  char next[8192];
+  int hop;
+  if (!buf || cap < 8 || g_tmpl < 0 || !url || !url[0]) return -1;
+  snprintf(cur, sizeof cur, "%s", url);
+  for (hop = 0; hop < 4; hop++) {
+    int req, total = 0, n, code = 0;
+    req = sceHttp2CreateRequestWithURL(g_tmpl, "GET", cur, 0);
+    if (req < 0) return -1;
+    sceHttp2SetAutoRedirect(req, 1);
+    sceHttp2AddRequestHeader(req, "Accept", "*/*", SCE_HTTP_HEADER_OVERWRITE);
+    sceHttp2AddRequestHeader(req, "User-Agent", ua && ua[0] ? ua : "Mozilla/5.0",
+                             SCE_HTTP_HEADER_OVERWRITE);
+    if (ref && ref[0])
+      sceHttp2AddRequestHeader(req, "Referer", ref, SCE_HTTP_HEADER_OVERWRITE);
+    if (sceHttp2SendRequest(req, "", 0) != 0) {
+      sceHttp2DeleteRequest(req);
+      return -1;
+    }
+    sceHttp2GetStatusCode(req, &code);
+    if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+      if (header_location(req, next, (int)sizeof next) != 0 || strncmp(next, "http", 4) != 0) {
+        sceHttp2DeleteRequest(req);
+        return -1;
+      }
+      sceHttp2DeleteRequest(req);
+      snprintf(cur, sizeof cur, "%s", next);
+      continue;
+    }
+    while (total + 1 < cap &&
+           (n = sceHttp2ReadData(req, buf + total, (size_t)(cap - total - 1))) > 0)
+      total += n;
+    sceHttp2DeleteRequest(req);
+    if (status) *status = code;
+    return total;
+  }
+  return -1;
+}
+
+const char *ytm_pending_url(void) { return g_pending; }
+
+int ytm_audio_prepare(const char *video_id, unsigned char **out, int *out_n, int *duration,
+                      char *err, int err_n) {
+  unsigned char *buf;
+  int status = 0;
+  int n;
+  int dur = 0;
+  if (out) *out = NULL;
+  if (out_n) *out_n = 0;
+  if (duration) *duration = 0;
+  g_pending[0] = 0;
+  if (!video_id || !video_id[0] || !out || !out_n) return -1;
+  if (ytm_audio_url(video_id, g_pending, (int)sizeof g_pending, &dur, err, err_n) != 0) return -1;
+  if (duration) *duration = dur;
+  buf = (unsigned char *)malloc(AUDIO_CAP);
+  if (!buf) return 0;
+  n = http_get_hdr(g_pending, buf, AUDIO_CAP, &status, ytm_stream_ua(), ytm_stream_referer());
+  if (n > 2048 && n < AUDIO_CAP - 64 && buf[4] == 'f' && buf[5] == 't' && buf[6] == 'y' &&
+      buf[7] == 'p') {
+    *out = buf;
+    *out_n = n;
+    err[0] = 0;
+    return 0;
+  }
+  free(buf);
+  err[0] = 0;
+  return 0;
 }
 
 static const char *cover_key_of(const Track *t, char *tmp, int n) {
@@ -1312,23 +1465,23 @@ static CoverSlot *cover_slot(const char *key) {
   return victim;
 }
 
+static int try_jpeg(const char *url, unsigned char *buf, unsigned char *dst) {
+  int status = 0;
+  int n;
+  if (!url || !url[0]) return -1;
+  n = http_get_bin(url, buf, 512 * 1024, &status);
+  if (status == 200 && n > 64 && art_jpeg_square(buf, n, dst, COVER_SIDE) == 0) return 0;
+  return -1;
+}
+
 int ytm_cover_fetch(const Track *t) {
   char key[80];
   char url[YTM_THUMB_LEN];
-  const char *src;
   CoverSlot *slot;
   unsigned char *buf;
   unsigned char *dst;
-  int status = 0;
-  int n;
+  int ok = 0;
   if (!t) return -1;
-  if (t->thumb[0]) src = t->thumb;
-  else if (t->id[0]) {
-    snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", t->id);
-    src = url;
-  } else {
-    return -1;
-  }
   cover_key_of(t, key, (int)sizeof key);
   if (!key[0]) return -1;
   slot = cover_find(key);
@@ -1336,17 +1489,30 @@ int ytm_cover_fetch(const Track *t) {
     slot->stamp = ++g_cover_tick;
     return 0;
   }
-  if (slot && slot->fails >= 2) return -1;
+  if (slot && slot->fails >= 3) return -1;
   slot = cover_slot(key);
-  buf = (unsigned char *)malloc(180 * 1024);
+  buf = (unsigned char *)malloc(512 * 1024);
   dst = (unsigned char *)malloc((size_t)COVER_SIDE * COVER_SIDE * 4u);
   if (!buf || !dst) {
     free(buf);
     free(dst);
     return -1;
   }
-  n = http_get_bin(src, buf, 180 * 1024, &status);
-  if (n > 64 && status == 200 && art_jpeg_square(buf, n, dst, COVER_SIDE) == 0) {
+  url[0] = 0;
+  if (t->id[0]) {
+    snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/hq720.jpg", t->id);
+    if (try_jpeg(url, buf, dst) == 0) ok = 1;
+    if (!ok) {
+      snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/sddefault.jpg", t->id);
+      if (try_jpeg(url, buf, dst) == 0) ok = 1;
+    }
+    if (!ok) {
+      snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", t->id);
+      if (try_jpeg(url, buf, dst) == 0) ok = 1;
+    }
+  }
+  if (!ok && t->thumb[0] && try_jpeg(t->thumb, buf, dst) == 0) ok = 1;
+  if (ok) {
     free(slot->px);
     slot->px = dst;
     slot->fails = 0;
@@ -1354,12 +1520,13 @@ int ytm_cover_fetch(const Track *t) {
     slot->stamp = ++g_cover_tick;
   } else {
     free(dst);
-    if (slot->key[0] && strcmp(slot->key, key) == 0) slot->fails++;
-    else if (!slot->key[0]) {
+    if (!slot->key[0] || strcmp(slot->key, key) != 0) {
       snprintf(slot->key, sizeof slot->key, "%s", key);
       slot->fails = 1;
-      slot->stamp = ++g_cover_tick;
+    } else if (slot->fails < 8) {
+      slot->fails++;
     }
+    slot->stamp = ++g_cover_tick;
   }
   free(buf);
   return slot->px ? 0 : -1;
@@ -1454,6 +1621,17 @@ int sceHttp2ReadData(int a, void *b, size_t c) {
   (void)b;
   (void)c;
   return 0;
+}
+int sceHttp2SetAutoRedirect(int a, int b) {
+  (void)a;
+  (void)b;
+  return 0;
+}
+int sceHttp2GetAllResponseHeaders(int a, char **b, size_t *c) {
+  (void)a;
+  if (b) *b = NULL;
+  if (c) *c = 0;
+  return -1;
 }
 int art_jpeg_square(const unsigned char *a, int b, unsigned char *c, int d) {
   (void)a;

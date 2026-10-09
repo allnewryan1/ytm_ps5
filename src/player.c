@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -25,12 +26,18 @@ static atomic_int g_stop;
 static atomic_int g_paused;
 static int g_seek_req;
 static double g_seek_to;
-static char g_url[4096];
+static char g_url[8192];
+static char g_ua[200];
+static char g_ref[120];
 static char g_err[192];
 static int g_duration_hint;
 static atomic_uint_least64_t g_samples;
 static atomic_int g_ended;
 static atomic_int g_volume; /* 0..100 */
+static unsigned char *g_owned;
+static unsigned char *g_audio;
+static int g_audio_n;
+static int g_audio_off;
 
 static int interrupt_cb(void *opaque) {
   (void)opaque;
@@ -63,6 +70,27 @@ int player_open(char *err, int err_n) {
   return 0;
 }
 
+static int mem_read(void *opaque, uint8_t *buf, int buf_size) {
+  (void)opaque;
+  if (g_audio_off >= g_audio_n) return AVERROR_EOF;
+  if (buf_size > g_audio_n - g_audio_off) buf_size = g_audio_n - g_audio_off;
+  memcpy(buf, g_audio + g_audio_off, (size_t)buf_size);
+  g_audio_off += buf_size;
+  return buf_size;
+}
+
+static int64_t mem_seek(void *opaque, int64_t off, int whence) {
+  (void)opaque;
+  if (whence & AVSEEK_SIZE) return g_audio_n;
+  whence &= ~AVSEEK_FORCE;
+  if (whence == SEEK_SET) g_audio_off = (int)off;
+  else if (whence == SEEK_CUR) g_audio_off += (int)off;
+  else if (whence == SEEK_END) g_audio_off = g_audio_n + (int)off;
+  else return -1;
+  if (g_audio_off < 0 || g_audio_off > g_audio_n) return -1;
+  return g_audio_off;
+}
+
 static void *decode_main(void *arg) {
   AVFormatContext *fmt = NULL;
   AVCodecContext *dec = NULL;
@@ -71,12 +99,20 @@ static void *decode_main(void *arg) {
   SwrContext *swr = NULL;
   const AVCodec *codec = NULL;
   AVDictionary *opts = NULL;
+  AVIOContext *avio = NULL;
+  int custom = 0;
   int si;
-  char url[4096];
+  char url[8192];
+  char ua[200];
+  char ref[120];
+  int use_mem;
   (void)arg;
 
   pthread_mutex_lock(&g_mu);
   snprintf(url, sizeof url, "%s", g_url);
+  snprintf(ua, sizeof ua, "%s", g_ua);
+  snprintf(ref, sizeof ref, "%s", g_ref);
+  use_mem = g_audio != NULL && g_audio_n > 32;
   pthread_mutex_unlock(&g_mu);
 
   fmt = avformat_alloc_context();
@@ -87,19 +123,43 @@ static void *decode_main(void *arg) {
   fmt->interrupt_callback.callback = interrupt_cb;
   fmt->interrupt_callback.opaque = NULL;
 
-  av_dict_set(&opts, "user_agent", ytm_stream_ua(), 0);
-  av_dict_set(&opts, "referer", ytm_stream_referer(), 0);
-  av_dict_set(&opts, "reconnect", "1", 0);
-  av_dict_set(&opts, "reconnect_streamed", "1", 0);
-  av_dict_set(&opts, "rw_timeout", "15000000", 0);
-
-  if (avformat_open_input(&fmt, url, NULL, &opts) < 0) {
-    set_err("Could not open the audio stream");
+  if (use_mem) {
+    unsigned char *ab = av_malloc(8192);
+    if (!ab) {
+      set_err("Decoder ran out of memory");
+      goto done;
+    }
+    g_audio_off = 0;
+    avio = avio_alloc_context(ab, 8192, 0, NULL, mem_read, NULL, mem_seek);
+    if (!avio) {
+      av_free(ab);
+      set_err("Decoder ran out of memory");
+      goto done;
+    }
+    fmt->pb = avio;
+    fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+    custom = 1;
+    if (avformat_open_input(&fmt, NULL, NULL, NULL) < 0) {
+      set_err("Could not open the audio stream");
+      goto done;
+    }
+  } else {
+    av_dict_set(&opts, "user_agent", ua[0] ? ua : ytm_stream_ua(), 0);
+    av_dict_set(&opts, "referer", ref[0] ? ref : ytm_stream_referer(), 0);
+    av_dict_set(&opts, "headers", "Origin: https://www.youtube.com\r\n", 0);
+    av_dict_set(&opts, "seekable", "0", 0);
+    av_dict_set(&opts, "multiple_requests", "1", 0);
+    av_dict_set(&opts, "reconnect", "1", 0);
+    av_dict_set(&opts, "reconnect_streamed", "1", 0);
+    av_dict_set(&opts, "rw_timeout", "15000000", 0);
+    if (avformat_open_input(&fmt, url, NULL, &opts) < 0) {
+      set_err("Could not open the audio stream");
+      av_dict_free(&opts);
+      goto done;
+    }
     av_dict_free(&opts);
-    goto done;
+    opts = NULL;
   }
-  av_dict_free(&opts);
-  opts = NULL;
 
   if (avformat_find_stream_info(fmt, NULL) < 0) {
     set_err("Could not read stream info");
@@ -230,13 +290,38 @@ done:
   if (pkt) av_packet_free(&pkt);
   if (frame) av_frame_free(&frame);
   if (dec) avcodec_free_context(&dec);
-  if (fmt) avformat_close_input(&fmt);
+  if (fmt) {
+    AVIOContext *pb = custom ? fmt->pb : NULL;
+    if (custom) fmt->pb = NULL;
+    avformat_close_input(&fmt);
+    if (pb) {
+      av_freep(&pb->buffer);
+      avio_context_free(&pb);
+    }
+  } else if (avio) {
+    av_freep(&avio->buffer);
+    avio_context_free(&avio);
+  }
   if (opts) av_dict_free(&opts);
   return NULL;
 }
 
+static void remember_headers(void) {
+  snprintf(g_ua, sizeof g_ua, "%s", ytm_stream_ua());
+  snprintf(g_ref, sizeof g_ref, "%s", ytm_stream_referer());
+}
+
+static void drop_audio(void) {
+  free(g_owned);
+  g_owned = NULL;
+  g_audio = NULL;
+  g_audio_n = 0;
+  g_audio_off = 0;
+}
+
 int player_start(const char *url, int duration_s) {
   player_stop();
+  drop_audio();
   if (!url || !url[0]) {
     set_err("Missing audio URL");
     return -1;
@@ -247,6 +332,7 @@ int player_start(const char *url, int duration_s) {
   }
   pthread_mutex_lock(&g_mu);
   snprintf(g_url, sizeof g_url, "%s", url);
+  remember_headers();
   g_err[0] = 0;
   g_stop = 0;
   g_paused = 0;
@@ -267,6 +353,67 @@ int player_start(const char *url, int duration_s) {
   return 0;
 }
 
+int player_start_mem(unsigned char *data, int n, int duration_s) {
+  player_stop();
+  drop_audio();
+  if (!data || n < 32) {
+    free(data);
+    set_err("Missing audio");
+    return -1;
+  }
+  if (g_dev == 0) {
+    free(data);
+    set_err("Audio output is not open");
+    return -1;
+  }
+  g_owned = data;
+  g_audio = data;
+  g_audio_n = n;
+  g_audio_off = 0;
+  pthread_mutex_lock(&g_mu);
+  g_url[0] = 0;
+  remember_headers();
+  g_err[0] = 0;
+  g_stop = 0;
+  g_paused = 0;
+  g_seek_req = 0;
+  g_duration_hint = duration_s > 0 ? duration_s : 0;
+  pthread_mutex_unlock(&g_mu);
+  atomic_store(&g_samples, 0);
+  atomic_store(&g_ended, 0);
+  atomic_store(&g_stop, 0);
+  atomic_store(&g_paused, 0);
+  SDL_ClearQueuedAudio(g_dev);
+  SDL_PauseAudioDevice(g_dev, 0);
+  if (pthread_create(&g_thread, NULL, decode_main, NULL) != 0) {
+    set_err("Could not start the decoder thread");
+    return -1;
+  }
+  g_thread_live = 1;
+  return 0;
+}
+
+int player_replay(void) {
+  unsigned char *keep;
+  int n;
+  int dur;
+  char url[8192];
+  if (g_owned && g_audio_n > 32) {
+    keep = g_owned;
+    n = g_audio_n;
+    dur = g_duration_hint;
+    g_owned = NULL;
+    g_audio = NULL;
+    return player_start_mem(keep, n, dur);
+  }
+  pthread_mutex_lock(&g_mu);
+  snprintf(url, sizeof url, "%s", g_url);
+  dur = g_duration_hint;
+  pthread_mutex_unlock(&g_mu);
+  if (!url[0]) return -1;
+  return player_start(url, dur);
+}
+
 void player_stop(void) {
   if (!g_thread_live) return;
   atomic_store(&g_stop, 1);
@@ -278,6 +425,7 @@ void player_stop(void) {
 
 void player_close(void) {
   player_stop();
+  drop_audio();
   if (g_dev) {
     SDL_CloseAudioDevice(g_dev);
     g_dev = 0;

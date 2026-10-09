@@ -17,7 +17,7 @@
 
 enum { NAV_HOME, NAV_SEARCH, NAV_LIBRARY, NAV_ACCOUNT, NAV_QUIT, NAV_COUNT };
 enum { ZONE_NAV, ZONE_BODY };
-enum { BODY_HOME, BODY_LIST, BODY_SEARCH, BODY_LIBRARY, BODY_ACCOUNT, BODY_EXPLORE, BODY_QUEUE };
+enum { BODY_HOME, BODY_LIST, BODY_SEARCH, BODY_LIBRARY, BODY_ACCOUNT, BODY_EXPLORE };
 enum { REP_OFF, REP_ALL, REP_ONE };
 
 static const char *nav_name[] = {"Home", "Explore", "Library", "Account", "Quit"};
@@ -57,8 +57,9 @@ static int g_keyr;
 static int g_keyc;
 static int g_player_ui;
 static int g_repeat = REP_OFF;
+static int g_trig_l;
+static int g_trig_r;
 static int g_acct_sel;
-static int g_auth_wait;
 static int g_auth_wait;
 static int g_auth_interval = 5;
 static Uint32 g_auth_next;
@@ -72,7 +73,7 @@ static int g_nlikes;
 static Track g_queue[YTM_TRACK_CAP];
 static int g_nqueue;
 static int g_qindex = -1;
-static char g_url[4096];
+static int g_qpick;
 static char g_query[81];
 static char g_list_title[80];
 static char g_status[220];
@@ -269,32 +270,37 @@ static void do_search(const char *q) {
 
 static void play_queue_index(int idx) {
   char err[192];
-  char url[4096];
-  const char *cached;
+  unsigned char *bytes = NULL;
+  int nbytes = 0;
   int dur = 0;
+  const char *pending;
   if (idx < 0 || idx >= g_nqueue) return;
   snprintf(g_status, sizeof g_status, "Opening %s", g_queue[idx].title);
   paint();
-  cached = ytm_prefetch_url(g_queue[idx].id, &dur);
-  if (cached) {
-    snprintf(url, sizeof url, "%s", cached);
-    ytm_prefetch_drop(g_queue[idx].id);
-  } else if (ytm_audio_url(g_queue[idx].id, url, (int)sizeof url, &dur, err, (int)sizeof err) != 0) {
+  if (ytm_audio_prepare(g_queue[idx].id, &bytes, &nbytes, &dur, err, (int)sizeof err) != 0) {
     set_status(err);
     toast(err);
     return;
   }
   if (dur > 0) g_queue[idx].seconds = dur;
-  if (player_start(url, g_queue[idx].seconds) != 0) {
-    set_status(player_error()[0] ? player_error() : "Playback failed");
-    toast(g_status);
-    return;
+  if (bytes) {
+    if (player_start_mem(bytes, nbytes, g_queue[idx].seconds) != 0) {
+      set_status(player_error()[0] ? player_error() : "Playback failed");
+      toast(g_status);
+      return;
+    }
+  } else {
+    pending = ytm_pending_url();
+    if (!pending || !pending[0] || player_start(pending, g_queue[idx].seconds) != 0) {
+      set_status(player_error()[0] ? player_error() : "Playback failed");
+      toast(g_status);
+      return;
+    }
   }
-  snprintf(g_url, sizeof g_url, "%s", url);
   g_qindex = idx;
+  g_qpick = idx;
   g_player_ui = 1;
   set_status("");
-  if (idx + 1 < g_nqueue && g_queue[idx + 1].id[0]) ytm_prefetch_audio(g_queue[idx + 1].id);
 }
 
 static void play_list(Track *list, int n, int idx) {
@@ -312,8 +318,8 @@ static void maybe_advance(void) {
     set_status(player_error());
     return;
   }
-  if (g_repeat == REP_ONE && g_url[0] && g_qindex >= 0) {
-    player_start(g_url, g_queue[g_qindex].seconds);
+  if (g_repeat == REP_ONE && g_qindex >= 0) {
+    player_replay();
     return;
   }
   if (g_qindex + 1 < g_nqueue) play_queue_index(g_qindex + 1);
@@ -423,30 +429,39 @@ static void open_account(void) {
   start_code();
 }
 
-static Track g_home_feed[YTM_TRACK_CAP];
-static int g_nhome;
+static Track g_quick[18];
+static Track g_mixes[12];
+static int g_nquick;
+static int g_nmixes;
+static int g_quick_sel;
+static int g_mix_sel;
+static int g_home_sec;
 static int g_home_try;
+
+static int home_ready(void) { return g_nquick > 0 || g_nmixes > 0; }
 
 static void load_home(void) {
   char err[192];
-  int n;
-  if (g_home_try && g_nhome > 0) return;
+  int ns = 0, nm = 0;
+  if (g_home_try && home_ready()) return;
   if (g_home_try && !ytm_signed_in()) return;
   g_home_try = 1;
   if (!ytm_signed_in() && !(ytm_refresh_token()[0] && ytm_auth_refresh(err, (int)sizeof err) == 0))
     return;
   set_status("Loading your home...");
   paint();
-  n = ytm_home(g_home_feed, YTM_TRACK_CAP, err, (int)sizeof err);
-  if (n > 0) {
-    g_nhome = n;
-    g_sel = 0;
-    g_scroll = 0;
-    set_status("For you");
-  } else {
-    g_nhome = 0;
+  if (ytm_home(g_quick, 18, &ns, g_mixes, 12, &nm, err, (int)sizeof err) != 0) {
+    g_nquick = 0;
+    g_nmixes = 0;
     set_status(err[0] ? err : "Pick a shelf.");
+    return;
   }
+  g_nquick = ns;
+  g_nmixes = nm;
+  g_quick_sel = 0;
+  g_mix_sel = 0;
+  g_home_sec = ns > 0 ? 0 : 1;
+  set_status("");
 }
 
 static void play_or_open(Track *list, int n, int idx) {
@@ -479,24 +494,12 @@ static void play_or_open(Track *list, int n, int idx) {
   else set_status(err[0] ? err : "Nothing in that shelf");
 }
 
-static void open_queue(void) {
-  if (g_nqueue < 1) {
-    set_status("Nothing queued");
-    return;
-  }
-  if (g_body != BODY_QUEUE) remember_here();
-  g_body = BODY_QUEUE;
-  g_zone = ZONE_BODY;
-  g_nav = NAV_HOME;
-  g_sel = g_qindex >= 0 ? g_qindex : 0;
-  g_scroll = 0;
-  keep_sel_visible(g_nqueue);
-  set_status("");
-}
-
 static void on_activate(void) {
   if (g_player_ui) {
-    player_toggle();
+    if (g_nqueue > 0 && g_qpick >= 0 && g_qpick < g_nqueue && g_qpick != g_qindex)
+      play_queue_index(g_qpick);
+    else
+      player_toggle();
     return;
   }
   if (g_zone == ZONE_NAV) {
@@ -506,7 +509,7 @@ static void on_activate(void) {
     }
     if (g_nav == NAV_HOME) {
       g_body = BODY_HOME;
-      if (g_nhome == 0) load_home();
+      if (!home_ready()) load_home();
     } else if (g_nav == NAV_SEARCH) {
       g_body = BODY_EXPLORE;
       g_explore = 0;
@@ -523,8 +526,9 @@ static void on_activate(void) {
     return;
   }
   if (g_body == BODY_HOME) {
-    if (g_nhome > 0) {
-      play_or_open(g_home_feed, g_nhome, g_sel);
+    if (home_ready()) {
+      if (g_home_sec == 0 && g_nquick > 0) play_or_open(g_quick, g_nquick, g_quick_sel);
+      else if (g_nmixes > 0) play_or_open(g_mixes, g_nmixes, g_mix_sel);
     } else {
       do_search(moods[g_home][1]);
       if (g_nresults > 0) play_list(g_results, g_nresults, 0);
@@ -537,8 +541,6 @@ static void on_activate(void) {
     if (!ytm_signed_in()) open_account();
     else if (g_nlikes > 0) play_or_open(g_likes, g_nlikes, g_sel);
     else open_library();
-  } else if (g_body == BODY_QUEUE) {
-    play_queue_index(g_sel);
   } else if (g_body == BODY_ACCOUNT) {
     if (!ytm_signed_in()) {
       start_code();
@@ -610,7 +612,11 @@ static void keep_sel_visible(int n) {
 static void on_move(int dx, int dy) {
   if (g_player_ui) {
     if (dx) player_seek_by(dx * 10.0);
-    if (dy) player_volume_add(-dy * 5);
+    if (dy) {
+      g_qpick += dy;
+      if (g_qpick < 0) g_qpick = 0;
+      if (g_nqueue > 0 && g_qpick >= g_nqueue) g_qpick = g_nqueue - 1;
+    }
     return;
   }
   if (g_zone == ZONE_NAV) {
@@ -622,17 +628,48 @@ static void on_move(int dx, int dy) {
     }
     return;
   }
-  if (dx < 0 && g_body != BODY_SEARCH && !(g_body == BODY_HOME && g_nhome == 0)) {
+  if (dx < 0 && g_body != BODY_SEARCH && g_body != BODY_HOME) {
     g_zone = ZONE_NAV;
     return;
   }
-  if (g_body == BODY_HOME && g_nhome > 0) {
-    if (dx < 0) {
+  if (g_body == BODY_HOME && home_ready()) {
+    int cols = 2;
+    int *sel = g_home_sec == 0 ? &g_quick_sel : &g_mix_sel;
+    int n = g_home_sec == 0 ? g_nquick : g_nmixes;
+    int x, y, rows;
+    if (n < 1 && g_home_sec == 0 && g_nmixes > 0) {
+      g_home_sec = 1;
+      sel = &g_mix_sel;
+      n = g_nmixes;
+    }
+    if (n < 1) return;
+    x = *sel % cols;
+    y = *sel / cols;
+    rows = (n + cols - 1) / cols;
+    x += dx;
+    y += dy;
+    if (x < 0) {
       g_zone = ZONE_NAV;
       return;
     }
-    g_sel += dy;
-    keep_sel_visible(g_nhome);
+    if (x >= cols) x = cols - 1;
+    if (y < 0) {
+      if (g_home_sec == 1 && g_nquick > 0) {
+        g_home_sec = 0;
+        if (g_quick_sel >= g_nquick) g_quick_sel = g_nquick - 1;
+      }
+      return;
+    }
+    if (y >= rows) {
+      if (g_home_sec == 0 && g_nmixes > 0) {
+        g_home_sec = 1;
+        if (g_mix_sel >= g_nmixes) g_mix_sel = g_nmixes - 1;
+      }
+      return;
+    }
+    if (y * cols + x >= n) x = (n - 1) % cols;
+    *sel = y * cols + x;
+    if (*sel >= n) *sel = n - 1;
     return;
   }
   if (g_body == BODY_HOME) {
@@ -680,7 +717,7 @@ static void on_move(int dx, int dy) {
     return;
   }
   g_sel += dy;
-  keep_sel_visible(g_body == BODY_LIBRARY ? g_nlikes : g_body == BODY_QUEUE ? g_nqueue : g_nresults);
+  keep_sel_visible(g_body == BODY_LIBRARY ? g_nlikes : g_nresults);
 }
 
 static int g_art_budget;
@@ -711,50 +748,57 @@ static void draw_disc(Draw *d, int cx, int cy, int rad, int r, int g, int b) {
   }
 }
 
-static void stroke(Draw *d, int x0, int y0, int x1, int y1, int thick, int r, int g, int b) {
+static void stroke_seg(Draw *d, int x0, int y0, int x1, int y1, int rad, int r, int g, int b) {
   int dx = x1 - x0;
   int dy = y1 - y0;
   int steps = abs(dx) > abs(dy) ? abs(dx) : abs(dy);
   int i;
   if (steps < 1) steps = 1;
-  if (thick < 1) thick = 1;
-  for (i = 0; i <= steps; i++) {
-    int x = x0 + dx * i / steps;
-    int y = y0 + dy * i / steps;
-    fill_v(d, x - thick / 2, y - thick / 2, thick, thick, r, g, b);
-  }
+  for (i = 0; i <= steps; i++) draw_disc(d, x0 + dx * i / steps, y0 + dy * i / steps, rad, r, g, b);
 }
 
-static void arrow_head(Draw *d, int x, int y, int dir, int r, int g, int b) {
+static void tri_right(Draw *d, int tipx, int midy, int n, int r, int g, int b) {
   int i;
-  for (i = 0; i < 9; i++) {
-    if (dir > 0) fill_v(d, x - i, y - i, 3, i * 2 + 1, r, g, b);
-    else fill_v(d, x + i, y - i, 3, i * 2 + 1, r, g, b);
-  }
+  for (i = 0; i < n; i++) fill_v(d, tipx - i, midy - i, 1, i * 2 + 1, r, g, b);
+}
+
+static void tri_left(Draw *d, int tipx, int midy, int n, int r, int g, int b) {
+  int i;
+  for (i = 0; i < n; i++) fill_v(d, tipx + i, midy - i, 1, i * 2 + 1, r, g, b);
 }
 
 static void draw_repeat_icon(Draw *d, int cx, int cy, int mode, int hr, int hg, int hb) {
-  int rad = 30;
-  int t = 4;
+  /* Light disc, dark ink. Rounded hooks, not a copied glyph. */
+  static const int top_arc[][2] = {
+      {-4, 0}, {-4, -1}, {-4, -2}, {-3, -2}, {-3, -3}, {-2, -3}, {-2, -4}, {-1, -4}, {0, -4},
+  };
+  static const int bot_arc[][2] = {
+      {4, 0}, {4, 1}, {4, 2}, {3, 2}, {3, 3}, {2, 3}, {2, 4}, {1, 4}, {0, 4},
+  };
+  int i;
+  int ink_r = 18, ink_g = 18, ink_b = 22;
   (void)hr;
   (void)hg;
   (void)hb;
-  /* Original loop drawn at a size that stays sharp on a 1080p canvas. */
-  draw_disc(d, cx, cy, rad, 12, 13, 16);
-  stroke(d, cx - 10, cy - 10, cx + 8, cy - 10, t, 244, 242, 236);
-  stroke(d, cx + 8, cy - 10, cx + 14, cy - 2, t, 244, 242, 236);
-  stroke(d, cx + 14, cy - 2, cx + 14, cy + 6, t, 244, 242, 236);
-  arrow_head(d, cx + 10, cy - 10, 1, 244, 242, 236);
-  stroke(d, cx + 10, cy + 10, cx - 8, cy + 10, t, 244, 242, 236);
-  stroke(d, cx - 8, cy + 10, cx - 14, cy + 2, t, 244, 242, 236);
-  stroke(d, cx - 14, cy + 2, cx - 14, cy - 6, t, 244, 242, 236);
-  arrow_head(d, cx - 10, cy + 10, -1, 244, 242, 236);
+  draw_disc(d, cx, cy, 22, 244, 242, 236);
+  stroke_seg(d, cx - 10, cy + 1, cx - 10, cy - 5, 1, ink_r, ink_g, ink_b);
+  for (i = 0; i < 8; i++)
+    stroke_seg(d, cx - 6 + top_arc[i][0], cy - 5 + top_arc[i][1], cx - 6 + top_arc[i + 1][0],
+               cy - 5 + top_arc[i + 1][1], 1, ink_r, ink_g, ink_b);
+  stroke_seg(d, cx - 6, cy - 9, cx + 7, cy - 9, 1, ink_r, ink_g, ink_b);
+  tri_right(d, cx + 11, cy - 9, 5, ink_r, ink_g, ink_b);
+  stroke_seg(d, cx + 10, cy - 1, cx + 10, cy + 5, 1, ink_r, ink_g, ink_b);
+  for (i = 0; i < 8; i++)
+    stroke_seg(d, cx + 6 + bot_arc[i][0], cy + 5 + bot_arc[i][1], cx + 6 + bot_arc[i + 1][0],
+               cy + 5 + bot_arc[i + 1][1], 1, ink_r, ink_g, ink_b);
+  stroke_seg(d, cx + 6, cy + 9, cx - 7, cy + 9, 1, ink_r, ink_g, ink_b);
+  tri_left(d, cx - 11, cy + 9, 5, ink_r, ink_g, ink_b);
   if (mode == REP_ONE) {
-    stroke(d, cx + 1, cy - 6, cx + 1, cy + 7, t, 244, 242, 236);
-    stroke(d, cx - 4, cy - 2, cx + 1, cy - 6, 3, 244, 242, 236);
-    stroke(d, cx - 4, cy + 7, cx + 6, cy + 7, 3, 244, 242, 236);
+    stroke_seg(d, cx - 2, cy - 1, cx, cy - 4, 1, ink_r, ink_g, ink_b);
+    stroke_seg(d, cx, cy - 4, cx, cy + 4, 1, ink_r, ink_g, ink_b);
+    stroke_seg(d, cx - 3, cy + 4, cx + 3, cy + 4, 1, ink_r, ink_g, ink_b);
   } else if (mode == REP_OFF) {
-    stroke(d, cx - 16, cy - 16, cx + 16, cy + 16, t, 232, 86, 72);
+    stroke_seg(d, cx - 13, cy - 13, cx + 13, cy + 13, 1, ink_r, ink_g, ink_b);
   }
 }
 
@@ -817,7 +861,7 @@ static void draw_hints(Draw *d) {
   fill_v(d, 0, HINT_Y, 1920, 1080 - HINT_Y, 10, 11, 14);
   fill_v(d, 0, HINT_Y, 1920, 2, 212, 166, 86);
   if (g_player_ui) {
-    s = "X Pause   O Back   D-pad Seek / Volume   L1 R1 Skip   Touchpad Repeat";
+    s = "X Play   O Back   D-pad Seek / Queue   L2 R2 Volume   L1 R1 Skip   Touchpad Repeat";
   } else if (g_body == BODY_ACCOUNT) {
     s = ytm_signed_in()
             ? "X Sign out   O Back   Options Search   Touchpad Repeat"
@@ -832,12 +876,44 @@ static void draw_hints(Draw *d) {
     s = ytm_signed_in()
             ? "X Play   O Back   D-pad Move   Options Search   Touchpad Repeat   Triangle Player"
             : "X Sign in   O Back   Options Search   Touchpad Repeat";
-  } else if (g_body == BODY_QUEUE) {
-    s = "X Play   O Back   D-pad Move   L1 R1 Skip   Touchpad Repeat";
   } else {
     s = "X Play   O Back   D-pad Move   Triangle Player   Options Search   Touchpad Repeat";
   }
   draw_text(d, 28, HINT_Y + 16, 1, 214, 216, 224, s);
+}
+
+/* first_row is the first visible row of a 2-column grid. Returns y after the last row. */
+static int draw_two_col(Draw *d, char *line, int line_n, const Track *items, int n,
+                        int sel_idx, int selected, int first_row, int x0, int y, int rows) {
+  const int colw = 760;
+  const int x1 = x0 + colw + 16;
+  int r, c;
+  for (r = 0; r < rows; r++) {
+    for (c = 0; c < 2; c++) {
+      int idx = (first_row + r) * 2 + c;
+      int x = c ? x1 : x0;
+      int yy = y + r * 74;
+      if (idx >= n) continue;
+      if (selected && sel_idx == idx) fill_round(d, x - 8, yy - 4, colw, 68, 16, 32, 34, 44);
+      draw_track_art(d, x, yy, 56, &items[idx]);
+      fit(line, line_n, items[idx].title, 1, 640);
+      draw_text(d, x + 68, yy + 2, 1, 244, 242, 236, line);
+      fit(line, line_n, items[idx].artist, 1, 400);
+      draw_text(d, x + 68, yy + 30, 1, 150, 152, 164, line);
+    }
+  }
+  return y + rows * 74;
+}
+
+static int window_row(int sel, int n, int rows_vis) {
+  int row = sel / 2;
+  int total = (n + 1) / 2;
+  int first = 0;
+  if (rows_vis < 1) rows_vis = 1;
+  if (row >= rows_vis) first = row - rows_vis + 1;
+  if (first + rows_vis > total) first = total - rows_vis;
+  if (first < 0) first = 0;
+  return first;
 }
 
 static void paint(void) {
@@ -846,7 +922,7 @@ static void paint(void) {
   SDL_Surface *surf = SDL_GetWindowSurface(g_win);
   const Track *now = (g_qindex >= 0 && g_qindex < g_nqueue) ? &g_queue[g_qindex] : NULL;
   if (!surf) return;
-  g_art_budget = 8;
+  g_art_budget = 2;
   if (now && (now->id[0] || now->thumb[0]) && !ytm_cover_pixels(now, NULL, NULL)) {
     ytm_cover_fetch(now);
     g_art_budget--;
@@ -859,43 +935,60 @@ static void paint(void) {
     int dur = (int)player_duration();
     int pos = (int)player_position();
     int w = 0;
+    int qvis = 8;
+    int qscroll = 0;
     if (dur < 1) dur = now->seconds;
+    if (g_qpick >= qvis) qscroll = g_qpick - qvis + 1;
     fill_v(&d, 0, 0, 1920, 1080, 8, 9, 12);
     fill_round(&d, 28, 24, 1864, HINT_Y - 48, 36, 212, 166, 86);
     fill_round(&d, 36, 32, 1848, HINT_Y - 64, 32, 8, 9, 12);
     fill_round(&d, 56, 48, text_px("Now Playing", 1) + 40, 44, 22, 212, 166, 86);
     draw_text(&d, 76, 54, 1, 24, 18, 8, "Now Playing");
-    draw_track_art(&d, 780, 96, 360, now);
-    fit(line, (int)sizeof line, now->title, 2, 1500);
-    draw_text(&d, (1920 - text_px(line, 2)) / 2, 500, 2, 244, 242, 236, line);
-    fit(line, (int)sizeof line, now->artist, 1, 1200);
-    draw_text(&d, (1920 - text_px(line, 1)) / 2, 575, 1, 168, 170, 180, line);
+    draw_track_art(&d, 72, 120, 280, now);
+    fit(line, (int)sizeof line, now->title, 2, 860);
+    draw_text(&d, 72, 420, 2, 244, 242, 236, line);
+    fit(line, (int)sizeof line, now->artist, 1, 860);
+    draw_text(&d, 72, 490, 1, 168, 170, 180, line);
     if (now->album[0]) {
-      fit(line, (int)sizeof line, now->album, 1, 1200);
-      draw_text(&d, (1920 - text_px(line, 1)) / 2, 618, 1, 150, 152, 164, line);
+      fit(line, (int)sizeof line, now->album, 1, 860);
+      draw_text(&d, 72, 530, 1, 150, 152, 164, line);
     }
-    fill_round(&d, 360, 680, 1200, 8, 4, 40, 42, 52);
+    fill_round(&d, 72, 600, 860, 8, 4, 40, 42, 52);
     if (dur > 0) {
-      w = (int)(1200.0 * (pos / (double)dur));
+      w = (int)(860.0 * (pos / (double)dur));
       if (w < 0) w = 0;
-      if (w > 1200) w = 1200;
-      if (w > 0) fill_round(&d, 360, 680, w, 8, 4, 212, 166, 86);
+      if (w > 860) w = 860;
+      if (w > 0) fill_round(&d, 72, 600, w, 8, 4, 212, 166, 86);
     }
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);
-    draw_text(&d, 360, 700, 1, 168, 170, 180, a);
-    draw_text(&d, 1560 - text_px(b, 1), 700, 1, 168, 170, 180, b);
-    draw_text(&d, 470, 760, 1, 150, 152, 164, "Volume");
-    draw_volume(&d, 640, 772, 640);
-    draw_repeat_icon(&d, 1560, 776, g_repeat, 8, 9, 12);
+    draw_text(&d, 72, 618, 1, 168, 170, 180, a);
+    draw_text(&d, 932 - text_px(b, 1), 618, 1, 168, 170, 180, b);
+    draw_text(&d, 72, 680, 1, 150, 152, 164, "Volume");
+    draw_volume(&d, 220, 692, 480);
+    draw_repeat_icon(&d, 800, 696, g_repeat, 8, 9, 12);
     if (g_status[0]) {
-      fit(line, (int)sizeof line, g_status, 1, 1400);
-      draw_text(&d, (1920 - text_px(line, 1)) / 2, 830, 1, 232, 120, 96, line);
+      fit(line, (int)sizeof line, g_status, 1, 860);
+      draw_text(&d, 72, 760, 1, 232, 120, 96, line);
     } else if (player_error()[0]) {
-      fit(line, (int)sizeof line, player_error(), 1, 1400);
-      draw_text(&d, (1920 - text_px(line, 1)) / 2, 830, 1, 232, 120, 96, line);
+      fit(line, (int)sizeof line, player_error(), 1, 860);
+      draw_text(&d, 72, 760, 1, 232, 120, 96, line);
     } else if (player_paused()) {
-      draw_text(&d, (1920 - text_px("Paused", 1)) / 2, 830, 1, 196, 198, 206, "Paused");
+      draw_text(&d, 72, 760, 1, 196, 198, 206, "Paused");
+    }
+    fill_round(&d, 980, 110, 860, 760, 28, 22, 24, 32);
+    draw_text(&d, 1004, 128, 1, 244, 242, 236, "Up next");
+    for (int i = 0; i < qvis && qscroll + i < g_nqueue; i++) {
+      int idx = qscroll + i;
+      int y = 180 + i * 82;
+      int on = idx == g_qpick;
+      if (on) fill_round(&d, 996, y - 6, 828, 76, 18, 42, 36, 28);
+      if (idx == g_qindex) fill_v(&d, 996, y, 6, 64, 212, 166, 86);
+      draw_track_art(&d, 1016, y, 64, &g_queue[idx]);
+      fit(line, (int)sizeof line, g_queue[idx].title, 1, 680);
+      draw_text(&d, 1096, y + 4, 1, 244, 242, 236, line);
+      fit(line, (int)sizeof line, g_queue[idx].artist, 1, 480);
+      draw_text(&d, 1096, y + 36, 1, 150, 152, 164, line);
     }
     draw_hints(&d);
     present(&d);
@@ -910,11 +1003,10 @@ static void paint(void) {
   {
     const char *mode = "Choosing a section";
     if (g_zone != ZONE_NAV) {
-      if (g_body == BODY_HOME) mode = g_nhome > 0 ? "For you" : "Shelves";
+      if (g_body == BODY_HOME) mode = home_ready() ? "For you" : "Shelves";
       else if (g_body == BODY_EXPLORE) mode = "Explore";
       else if (g_body == BODY_SEARCH) mode = "Searching";
       else if (g_body == BODY_LIBRARY) mode = "Your library";
-      else if (g_body == BODY_QUEUE) mode = "Up next";
       else if (g_body == BODY_ACCOUNT) mode = ytm_signed_in() ? "Signed in" : "Signing in";
       else mode = "Song list";
     }
@@ -938,23 +1030,43 @@ static void paint(void) {
   }
 
   if (g_body == BODY_HOME) {
-    if (g_nhome > 0) {
-      const int vis = 6;
-      draw_text(&d, RAIL + 28, 24, 1, 244, 242, 236, "For you");
+    if (home_ready()) {
+      int x0 = RAIL + 28;
+      int y = 104;
+      int focus = (g_zone == ZONE_BODY);
+      draw_text(&d, x0, 24, 1, 244, 242, 236, "For you");
       if (g_status[0]) {
-        fit(line, (int)sizeof line, g_status, 1, 700);
+        fit(line, (int)sizeof line, g_status, 1, 500);
         draw_text(&d, 1920 - 40 - text_px(line, 1), 28, 1, 168, 170, 180, line);
       }
-      for (int i = 0; i < vis && g_scroll + i < g_nhome; i++) {
-        int idx = g_scroll + i;
-        int y = 100 + i * 120;
-        int sel = (g_zone == ZONE_BODY && g_sel == idx);
-        if (sel) fill_round(&d, RAIL + 16, y - 8, 1588, 108, 24, 32, 34, 44);
-        draw_track_art(&d, RAIL + 36, y, 84, &g_home_feed[idx]);
-        fit(line, (int)sizeof line, g_home_feed[idx].title, 1, 1100);
-        draw_text(&d, RAIL + 140, y + 8, 1, 244, 242, 236, line);
-        fit(line, (int)sizeof line, g_home_feed[idx].artist, 1, 900);
-        draw_text(&d, RAIL + 140, y + 46, 1, 150, 152, 164, line);
+      draw_text(&d, x0, 68, 1, 212, 166, 86, "Quick play");
+      if (g_nquick < 1) {
+        draw_text(&d, x0, y, 1, 140, 142, 154, "No songs yet");
+        y += 40;
+      } else {
+        int cap = g_nmixes > 0 ? 5 : (888 - y) / 74;
+        int total = (g_nquick + 1) / 2;
+        if (cap > total) cap = total;
+        if (cap < 1) cap = 1;
+        y = draw_two_col(&d, line, (int)sizeof line, g_quick, g_nquick, g_quick_sel,
+                         focus && g_home_sec == 0,
+                         (focus && g_home_sec == 0) ? window_row(g_quick_sel, g_nquick, cap) : 0,
+                         x0, y, cap);
+      }
+      y += 8;
+      draw_text(&d, x0, y, 1, 212, 166, 86, "Playlists");
+      y += 36;
+      if (g_nmixes < 1) {
+        draw_text(&d, x0, y, 1, 140, 142, 154, "No playlists yet");
+      } else {
+        int cap = (888 - y) / 74;
+        int total = (g_nmixes + 1) / 2;
+        if (cap > total) cap = total;
+        if (cap < 1) cap = 1;
+        draw_two_col(&d, line, (int)sizeof line, g_mixes, g_nmixes, g_mix_sel,
+                     focus && g_home_sec == 1,
+                     (focus && g_home_sec == 1) ? window_row(g_mix_sel, g_nmixes, cap) : 0,
+                     x0, y, cap);
       }
     } else {
     draw_text(&d, RAIL + 28, 24, 1, 244, 242, 236, "Shelves");
@@ -1049,10 +1161,9 @@ static void paint(void) {
       }
     }
   } else {
-    Track *list = g_body == BODY_LIBRARY ? g_likes : g_body == BODY_QUEUE ? g_queue : g_results;
-    int n = g_body == BODY_LIBRARY ? g_nlikes : g_body == BODY_QUEUE ? g_nqueue : g_nresults;
+    Track *list = g_body == BODY_LIBRARY ? g_likes : g_results;
+    int n = g_body == BODY_LIBRARY ? g_nlikes : g_nresults;
     const char *heading = g_body == BODY_LIBRARY ? "Library"
-                          : g_body == BODY_QUEUE ? "Up next"
                           : (g_list_title[0] ? g_list_title : "Songs");
     const int vis = 6;
     fit(line, (int)sizeof line, heading, 2, 1200);
@@ -1060,7 +1171,6 @@ static void paint(void) {
     if (n == 0) {
       const char *empty = "No songs for that search.";
       if (g_status[0]) empty = g_status;
-      else if (g_body == BODY_QUEUE) empty = "Nothing queued.";
       else if (g_body == BODY_LIBRARY)
         empty = ytm_signed_in() ? "No liked songs on this account."
                                 : "Sign in from Account to load your library.";
@@ -1073,8 +1183,6 @@ static void paint(void) {
       int sel = (g_zone == ZONE_BODY && g_sel == idx);
       char time[16];
       if (sel) fill_round(&d, RAIL + 16, y - 8, 1588, 108, 24, 32, 34, 44);
-      if (g_body == BODY_QUEUE && idx == g_qindex)
-        fill_v(&d, RAIL + 20, y, 6, 76, 212, 166, 86);
       draw_track_art(&d, RAIL + 36, y, 84, &list[idx]);
       fit(line, (int)sizeof line, list[idx].title, 1, 1100);
       draw_text(&d, RAIL + 140, y + 8, 1, 244, 242, 236, line);
@@ -1195,8 +1303,8 @@ static void poll_input(void) {
   if (edge(SDL_CONTROLLER_BUTTON_A)) on_activate();
   if (edge(SDL_CONTROLLER_BUTTON_B)) on_back();
   if (edge(SDL_CONTROLLER_BUTTON_Y)) {
-    if (g_nqueue > 0 && !g_player_ui && g_body != BODY_QUEUE) open_queue();
-    else g_player_ui = !g_player_ui;
+    g_player_ui = !g_player_ui;
+    if (g_player_ui) g_qpick = g_qindex >= 0 ? g_qindex : 0;
   }
   /* This pad reports the touchpad as start and Options as back. */
   if (edge(SDL_CONTROLLER_BUTTON_BACK)) {
@@ -1229,6 +1337,17 @@ static void poll_input(void) {
       if (abs(ax) > abs(ay)) dx = ax > 0 ? 1 : -1;
       else dy = ay > 0 ? 1 : -1;
     }
+  }
+  if (g_player_ui) {
+    int lt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    int rt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    if (lt > 16000 && g_trig_l <= 16000) player_volume_add(-5);
+    if (rt > 16000 && g_trig_r <= 16000) player_volume_add(5);
+    g_trig_l = lt;
+    g_trig_r = rt;
+  } else {
+    g_trig_l = 0;
+    g_trig_r = 0;
   }
   /* Keep d-pad edges honest even when we drive movement from hold_dir. */
   (void)SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
@@ -1293,7 +1412,8 @@ int main(int argc, char **argv) {
         set_status("Signed in");
         toast("Signed in to YouTube Music");
         g_home_try = 0;
-        g_nhome = 0;
+        g_nquick = 0;
+        g_nmixes = 0;
         load_home();
       } else if (rc < 0) {
         g_auth_wait = 0;
