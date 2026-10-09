@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1
+
+- A new song's mix is requested from the Android Music client. Signed in, that request carries the account token, so the mix can follow the account. If Android refuses the token, the public mix for that song is used instead. The music web client is not sent the token.
+
 ## 0.8.0
 
 - Signed-in For you no longer asks the TV client for FEmusic_home. That browse id is HTTP 400 with or without a token. Home tries the current Android Music client. If that page is empty or refused, liked songs and the library load on the TV client instead of leaving the 400 on screen.

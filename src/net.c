@@ -1047,28 +1047,53 @@ static void parse_panel(const char *s, const char *end, Track *t) {
   }
 }
 
-/* YouTube's radio for one song. playlistId RDAMVM + video id on the next call.
- * No bearer: the music web client rejects this device token. */
-int ytm_radio(const char *video_id, Track *out, int max, char *err, int err_n) {
+static int ensure_access(char *err, int err_n);
+
+/* Song radio. Signed in, the Android client gets the account token. That client
+ * accepts it; the music web client does not. A refusal falls back to the public mix. */
+static int post_android_next(const char *video_id, int authed, int *status, char *err, int err_n) {
   char body[640];
   char url[256];
-  int status = 0;
-  int n = 0;
-  if (!video_id || !id_ok(video_id) || !out || max < 1) return -1;
+  int skip, skip_user, n;
   snprintf(url, sizeof url, "https://music.youtube.com/youtubei/v1/next?key=%s&prettyPrint=false",
            INNERTUBE_KEY);
   snprintf(body, sizeof body,
-           "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-           "\"clientVersion\":\"1.20261009.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\","
+           "\"clientVersion\":\"9.40.51\",\"hl\":\"en\",\"gl\":\"US\",\"androidSdkVersion\":33}},"
            "\"videoId\":\"%s\",\"playlistId\":\"RDAMVM%s\",\"isAudioOnly\":true}",
            video_id, video_id);
-  if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/", NULL,
-                   NULL, 0, 1, &status, err, err_n) < 0 ||
-      status != 200 || !g_resp || !g_resp[0]) {
-    if (!err[0]) snprintf(err, (size_t)err_n, "No mix for that song");
-    return -1;
+  skip = g_skip_visitor;
+  skip_user = g_skip_authuser;
+  g_skip_visitor = 1;
+  g_skip_authuser = 1;
+  n = http_post_ex(url, body,
+                   "com.google.android.apps.youtube.music/9.40.51 (Linux; U; Android 13) gzip",
+                   "https://music.youtube.com", "https://music.youtube.com/", NULL, NULL, authed, 1,
+                   status, err, err_n);
+  g_skip_visitor = skip;
+  g_skip_authuser = skip_user;
+  return n;
+}
+
+/* YouTube's radio for one song. playlistId RDAMVM + video id on the next call. */
+int ytm_radio(const char *video_id, Track *out, int max, char *err, int err_n) {
+  int status = 0;
+  int n = 0;
+  int authed = 0;
+  char gate[8];
+  if (!video_id || !id_ok(video_id) || !out || max < 1) return -1;
+  if (g_refresh[0] && ensure_access(gate, (int)sizeof gate) == 0) authed = 1;
+  if (authed && post_android_next(video_id, 1, &status, err, err_n) > 0 && status == 200 && g_resp &&
+      g_resp[0])
+    walk_kind(g_resp, "\"playlistPanelVideoRenderer\":", out, &n, max, parse_panel);
+  if (n == 0) {
+    if (post_android_next(video_id, 0, &status, err, err_n) < 0 || status != 200 || !g_resp ||
+        !g_resp[0]) {
+      if (!err[0]) snprintf(err, (size_t)err_n, "No mix for that song");
+      return -1;
+    }
+    walk_kind(g_resp, "\"playlistPanelVideoRenderer\":", out, &n, max, parse_panel);
   }
-  walk_kind(g_resp, "\"playlistPanelVideoRenderer\":", out, &n, max, parse_panel);
   if (n == 0) snprintf(err, (size_t)err_n, "No mix for that song");
   else err[0] = 0;
   return n;
