@@ -84,6 +84,24 @@ static void park(const char *msg) {
   for (;;) sceKernelUsleep(1000000);
 }
 
+__attribute__((weak)) int ytm_heap_error(void) { return 0; }
+
+static void park_err(const char *extra) {
+  char msg[140];
+  const char *err = SDL_GetError();
+  int heap = ytm_heap_error();
+  if (!err || !err[0]) err = "stopped";
+  if (heap && extra && extra[0])
+    snprintf(msg, sizeof msg, "%s %s (heap %d)", err, extra, heap);
+  else if (heap)
+    snprintf(msg, sizeof msg, "%s (heap %d)", err, heap);
+  else if (extra && extra[0])
+    snprintf(msg, sizeof msg, "%s %s", err, extra);
+  else
+    snprintf(msg, sizeof msg, "%s", err);
+  park(msg);
+}
+
 static void set_status(const char *s) { snprintf(g_status, sizeof g_status, "%s", s ? s : ""); }
 
 static void fmt_time(char *d, int n, int sec) {
@@ -768,18 +786,23 @@ int main(int argc, char **argv) {
   toast("YouTube Music");
 
   /* Audio or the pad must not take the picture down with them. */
-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) park(SDL_GetError());
+  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) park_err(0);
   if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
     printf("ytmusic: audio: %s\n", SDL_GetError());
   if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
     printf("ytmusic: pad: %s\n", SDL_GetError());
   /* This SDL port has a window framebuffer and no render driver. */
   SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
-  g_win = SDL_CreateWindow("YouTube Music", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1920,
-                           1080, SDL_WINDOW_FULLSCREEN_DESKTOP);
-  if (!g_win) g_win = SDL_CreateWindow("YouTube Music", 0, 0, 1920, 1080, 0);
-  if (!g_win) park(SDL_GetError());
-  if (!SDL_GetWindowSurface(g_win)) park(SDL_GetError());
+  SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+  g_win = SDL_CreateWindow("YouTube Music", 0, 0, 1920, 1080, 0);
+  if (!g_win) park_err(0);
+  if (!SDL_GetWindowSurface(g_win)) {
+    char wh[32];
+    int w = 0, h = 0;
+    SDL_GetWindowSize(g_win, &w, &h);
+    snprintf(wh, sizeof wh, "%dx%d", w, h);
+    park_err(wh);
+  }
   SDL_StartTextInput();
   if (player_open(err, (int)sizeof err) != 0) set_status(err);
   if (net_init(err, (int)sizeof err) != 0) set_status(err);
