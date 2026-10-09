@@ -229,37 +229,85 @@ int text_px(const char *s, int scale) {
   return w;
 }
 
+static int glyph_alpha(const unsigned char *px, int w, int h, int x, int y) {
+  if ((unsigned)x >= (unsigned)w || (unsigned)y >= (unsigned)h) return 0;
+  return px[y * w + x];
+}
+
+/* 8.8 fixed point. Negative values stay defined; a right shift of a negative is not. */
+static void texel_at(int fixed, int *i0, int *frac) {
+  if (fixed >= 0) {
+    *i0 = fixed >> 8;
+    *frac = fixed & 255;
+    return;
+  }
+  {
+    int n = -fixed;
+    int q = n >> 8;
+    int r = n & 255;
+    if (r == 0) {
+      *i0 = -q;
+      *frac = 0;
+    } else {
+      *i0 = -q - 1;
+      *frac = 256 - r;
+    }
+  }
+}
+
 void draw_text(Draw *d, int x, int y, int scale, int r, int g, int b, const char *s) {
   const unsigned char *p;
   int pen;
+  int dest;
   if (!s || scale < 1 || !d->surf) return;
   pen = d->ox + (int)(x * d->s);
   y = d->oy + (int)(y * d->s);
-  scale = (int)(scale * d->s);
-  if (scale < 1) scale = 1;
+  dest = (int)(scale * d->s);
+  if (dest < 1) dest = 1;
   p = (const unsigned char *)s;
   while (*p) {
     unsigned cp = utf8_next(&p);
     const UiGlyph *gl;
     const unsigned char *px;
     int row, col;
+    int dw, dh;
     if (cp < 32) continue;
     gl = glyph_for(cp);
     px = ui_font_px + gl->off;
-    for (row = 0; row < gl->h; row++) {
-      for (col = 0; col < gl->w; col++) {
-        int a = px[row * gl->w + col];
-        int dx, dy;
-        if (a < 12) continue;
-        for (dy = 0; dy < scale; dy++) {
-          for (dx = 0; dx < scale; dx++) {
-            put_px(d, pen + (gl->xoff + col) * scale + dx, y + (gl->yoff + row) * scale + dy, r, g,
-                   b, a);
-          }
+    dw = gl->w * dest;
+    dh = gl->h * dest;
+    if (dest == 1) {
+      for (row = 0; row < gl->h; row++) {
+        for (col = 0; col < gl->w; col++) {
+          int a = px[row * gl->w + col];
+          if (a < 12) continue;
+          put_px(d, pen + gl->xoff + col, y + gl->yoff + row, r, g, b, a);
+        }
+      }
+    } else if (dw > 0 && dh > 0) {
+      /* Sample the outline instead of stamping blocks, so headlines stay smooth. */
+      for (row = 0; row < dh; row++) {
+        int sy = (int)(((long)(row * 2 + 1) * gl->h * 128) / dh) - 128;
+        int y0, fy;
+        texel_at(sy, &y0, &fy);
+        for (col = 0; col < dw; col++) {
+          int sx = (int)(((long)(col * 2 + 1) * gl->w * 128) / dw) - 128;
+          int x0, fx;
+          int a00, a10, a01, a11, a0, a1, a;
+          texel_at(sx, &x0, &fx);
+          a00 = glyph_alpha(px, gl->w, gl->h, x0, y0);
+          a10 = glyph_alpha(px, gl->w, gl->h, x0 + 1, y0);
+          a01 = glyph_alpha(px, gl->w, gl->h, x0, y0 + 1);
+          a11 = glyph_alpha(px, gl->w, gl->h, x0 + 1, y0 + 1);
+          a0 = a00 + ((a10 - a00) * fx) / 256;
+          a1 = a01 + ((a11 - a01) * fx) / 256;
+          a = a0 + ((a1 - a0) * fy) / 256;
+          if (a < 12) continue;
+          put_px(d, pen + gl->xoff * dest + col, y + gl->yoff * dest + row, r, g, b, a);
         }
       }
     }
-    pen += gl->advance * scale;
+    pen += gl->advance * dest;
   }
 }
 

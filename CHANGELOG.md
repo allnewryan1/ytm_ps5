@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+- Signed-in For you no longer calls the music web client with the device token. That call is the HTTP 400. Home now uses the TV client, the same one that loads the library, and then the Android music client if the TV page is empty. Charts are still only for signed-out home.
+- Large titles are filtered instead of drawn as blocks, so they stay readable on a 1080p and a 4K screen.
+- Search is a section in the side menu. On that page, Square deletes the last character. Options pauses or resumes the current song, and does nothing when nothing is playing.
+
 ## 0.6.0
 
 - Signed-in For you uses the same call as ytmusicapi get_home. That is music.youtube.com/youtubei/v1/browse?alt=json, client WEB_REMIX, the account token, and no API key. The next page is ctoken and continuation on that same call.

@@ -50,10 +50,10 @@ The install folder stays `PPSA99105`. The home screen title is YouTube Music. `e
 | --- | --- |
 | D-pad / left stick | Move |
 | Cross | Open, play, or pause |
-| Square | Song menu: play next, add to queue, album, artist |
+| Square | Song menu. On Search, deletes a character |
 | Circle | Back |
 | Triangle | Now playing, queue on that card |
-| Options | Search |
+| Options | Play or pause. Does nothing if nothing is playing |
 | Touchpad | Cycle repeat: off, all, one |
 | L1 / R1 | Previous / next |
 | L2 / R2 | Volume, while Now playing is open |

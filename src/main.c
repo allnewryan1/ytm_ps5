@@ -35,12 +35,12 @@
 #define M3_OUTLINE_VAR 83, 67, 65
 #define M3_ERROR 242, 184, 181
 
-enum { NAV_HOME, NAV_SEARCH, NAV_LIBRARY, NAV_ACCOUNT, NAV_QUIT, NAV_COUNT };
+enum { NAV_HOME, NAV_SEARCH, NAV_EXPLORE, NAV_LIBRARY, NAV_ACCOUNT, NAV_QUIT, NAV_COUNT };
 enum { ZONE_NAV, ZONE_BODY };
 enum { BODY_HOME, BODY_LIST, BODY_SEARCH, BODY_LIBRARY, BODY_ACCOUNT, BODY_EXPLORE };
 enum { REP_OFF, REP_ALL, REP_ONE };
 
-static const char *nav_name[] = {"Home", "Explore", "Library", "Account", "Quit"};
+static const char *nav_name[] = {"Home", "Search", "Explore", "Library", "Account", "Quit"};
 static const char *krow[] = {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"};
 static const char *specials[] = {"space", "del", "clear", "search"};
 static const char *moods[][2] = {
@@ -715,6 +715,10 @@ static void on_activate(void) {
       g_body = BODY_HOME;
       if (!home_ready()) load_home();
     } else if (g_nav == NAV_SEARCH) {
+      g_body = BODY_SEARCH;
+      g_player_ui = 0;
+      set_status("");
+    } else if (g_nav == NAV_EXPLORE) {
       g_body = BODY_EXPLORE;
       g_explore = 0;
       set_status("");
@@ -1111,20 +1115,20 @@ static void draw_hints(Draw *d) {
     s = "X Play   Square Menu   O Back   D-pad Queue   L2 R2 Volume   L1 R1 Skip   Touchpad Repeat";
   } else if (g_body == BODY_ACCOUNT) {
     s = ytm_signed_in()
-            ? "X Sign out   O Back   Options Search   Touchpad Repeat"
-            : "X New code   O Back   Options Search";
+            ? "X Sign out   O Back   Options Pause   Touchpad Repeat"
+            : "X New code   O Back   Options Pause";
   } else if (g_body == BODY_SEARCH) {
-    s = "X Type   O Back   D-pad Move   Triangle Player   Touchpad Repeat";
+    s = "X Type   Square Delete   O Back   D-pad Move   Options Pause";
   } else if (g_body == BODY_HOME) {
-    s = "X Play   Square Menu   O Back   D-pad Move   Options Search   Triangle Player";
+    s = "X Play   Square Menu   O Back   D-pad Move   Options Pause   Triangle Player";
   } else if (g_body == BODY_EXPLORE) {
-    s = "X Open   O Back   D-pad Move   Options Search   Touchpad Repeat";
+    s = "X Open   O Back   D-pad Move   Options Pause   Touchpad Repeat";
   } else if (g_body == BODY_LIBRARY) {
     s = ytm_signed_in()
-            ? "X Play   Square Menu   O Back   D-pad Move   Options Search   Triangle Player"
-            : "X Sign in   O Back   Options Search   Touchpad Repeat";
+            ? "X Play   Square Menu   O Back   D-pad Move   Options Pause   Triangle Player"
+            : "X Sign in   O Back   Options Pause   Touchpad Repeat";
   } else {
-    s = "X Play   Square Menu   O Back   D-pad Move   Triangle Player   Options Search";
+    s = "X Play   Square Menu   O Back   D-pad Move   Triangle Player   Options Pause";
   }
   draw_text(d, 28, HINT_Y + 16, 1, M3_ON_SURFACE_VAR, s);
 }
@@ -1253,7 +1257,7 @@ static void paint(void) {
     if (g_zone != ZONE_NAV) {
       if (g_body == BODY_HOME) mode = home_ready() ? "For you" : "Shelves";
       else if (g_body == BODY_EXPLORE) mode = "Explore";
-      else if (g_body == BODY_SEARCH) mode = "Searching";
+      else if (g_body == BODY_SEARCH) mode = "Search";
       else if (g_body == BODY_LIBRARY) mode = "Your library";
       else if (g_body == BODY_ACCOUNT) mode = ytm_signed_in() ? "Signed in" : "Signing in";
       else mode = "Song list";
@@ -1570,24 +1574,21 @@ static void poll_input(void) {
   if (edge(SDL_CONTROLLER_BUTTON_A)) on_activate();
   if (edge(SDL_CONTROLLER_BUTTON_B)) on_back();
   if (edge(SDL_CONTROLLER_BUTTON_X)) {
-    if (g_menu) g_menu = 0;
-    else menu_open();
+    if (g_body == BODY_SEARCH && !g_player_ui && !g_menu) {
+      int n = (int)strlen(g_query);
+      if (n > 0) g_query[n - 1] = 0;
+    } else if (g_menu)
+      g_menu = 0;
+    else
+      menu_open();
   }
   if (edge(SDL_CONTROLLER_BUTTON_Y)) {
     g_menu = 0;
     g_player_ui = !g_player_ui;
     if (g_player_ui) g_qpick = g_qindex >= 0 ? g_qindex : 0;
   }
-  /* This pad reports the touchpad as start and Options as back. */
-  if (edge(SDL_CONTROLLER_BUTTON_BACK)) {
-    g_menu = 0;
-    if (g_body != BODY_SEARCH) remember_here();
-    g_body = BODY_SEARCH;
-    g_zone = ZONE_BODY;
-    g_player_ui = 0;
-    g_nav = NAV_SEARCH;
-    g_auth_wait = 0;
-  }
+  /* Options pauses or resumes. It does nothing until a song is actually playing. */
+  if (edge(SDL_CONTROLLER_BUTTON_BACK)) player_toggle();
   if (edge(SDL_CONTROLLER_BUTTON_START)) {
     g_repeat = (g_repeat + 1) % 3;
     set_status(g_repeat == REP_ONE ? "Repeat one" : g_repeat == REP_ALL ? "Repeat all" : "Repeat off");
