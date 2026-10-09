@@ -455,6 +455,22 @@ static int is_noise(const char *s) {
 static void store_thumb(Track *t, const char *url) {
   const char *eq;
   int n;
+  int music = url && (strstr(url, "googleusercontent.com") || strstr(url, "ggpht.com"));
+  /* Catalog art is square. The ytimg video frame is widescreen and letterboxed. */
+  if (music) {
+    eq = strstr(url, "=w");
+    if (!eq) eq = strstr(url, "=s");
+    if (eq && (int)(eq - url) < (int)sizeof t->thumb - 20) {
+      n = (int)(eq - url);
+      memcpy(t->thumb, url, (size_t)n);
+      snprintf(t->thumb + n, sizeof t->thumb - (size_t)n, "=w720-h720-l90-rj");
+      return;
+    }
+    if ((int)strlen(url) < (int)sizeof t->thumb) {
+      snprintf(t->thumb, sizeof t->thumb, "%s", url);
+      return;
+    }
+  }
   if (t->id[0]) {
     snprintf(t->thumb, sizeof t->thumb, "https://i.ytimg.com/vi/%s/hq720.jpg", t->id);
     return;
@@ -481,8 +497,21 @@ static void finish_track(Track *t) {
   store_thumb(t, t->thumb);
 }
 
+static void note_video(const char *s, const char *end, Track *t) {
+  const char *p = find_bounded(s, end, "\"musicVideoType\":\"");
+  if (!p) return;
+  p += 19;
+  /* ATV is the audio track. OMV and UGC are pictures you watch. */
+  if (strncmp(p, "MUSIC_VIDEO_TYPE_ATV", 20) == 0) {
+    t->video = 0;
+    return;
+  }
+  if (strncmp(p, "MUSIC_VIDEO_TYPE_", 17) == 0) t->video = 1;
+}
+
 static void note_browse_ids(const char *s, const char *end, Track *t) {
   const char *p = s;
+  note_video(s, end, t);
   while ((p = find_bounded(p, end, "\"browseId\":\"")) != NULL) {
     char id[YTM_BROWSE_LEN];
     copy_json_str(p + 12, id, (int)sizeof id);
@@ -973,6 +1002,74 @@ int ytm_search(const char *query, Track *out, int max, char *err, int err_n) {
   if (n < 0) return -1;
   n = collect_tracks(g_resp, out, max);
   if (n == 0) snprintf(err, (size_t)err_n, "No songs for that search");
+  else err[0] = 0;
+  return n;
+}
+
+static void parse_panel(const char *s, const char *end, Track *t) {
+  const char *vid = find_bounded(s, end, "\"videoId\":\"");
+  const char *title = find_bounded(s, end, "\"title\":");
+  const char *by = find_bounded(s, end, "\"shortBylineText\":");
+  const char *len = find_bounded(s, end, "\"lengthText\":");
+  if (!by) by = find_bounded(s, end, "\"longBylineText\":");
+  if (!vid || !take_vid(vid + 11, end, t->id)) return;
+  if (title) {
+    const char *obj = strchr(title, '{');
+    const char *tend = obj ? json_end(obj) : end;
+    if (tend > end) tend = end;
+    if (obj) runs_into(obj, tend, t, 1);
+  }
+  if (by) {
+    const char *obj = strchr(by, '{');
+    const char *bend = obj ? json_end(obj) : end;
+    if (bend > end) bend = end;
+    if (obj) runs_into(obj, bend, t, 0);
+  }
+  if (len) {
+    const char *obj = strchr(len, '{');
+    const char *lend = obj ? json_end(obj) : end;
+    const char *tx;
+    if (lend > end) lend = end;
+    tx = obj ? find_bounded(obj, lend, "\"text\":\"") : NULL;
+    if (tx) {
+      char tmp[64];
+      copy_json_str(tx + 8, tmp, (int)sizeof tmp);
+      if (clock_seconds(tmp) >= 0) t->seconds = clock_seconds(tmp);
+    }
+  }
+  note_browse_ids(s, end, t);
+  {
+    const char *p = find_bounded(s, end, "\"url\":\"");
+    char url[300];
+    url[0] = 0;
+    if (p) copy_json_str(p + 7, url, (int)sizeof url);
+    store_thumb(t, url);
+  }
+}
+
+/* YouTube's radio for one song. playlistId RDAMVM + video id on the next call.
+ * No bearer: the music web client rejects this device token. */
+int ytm_radio(const char *video_id, Track *out, int max, char *err, int err_n) {
+  char body[640];
+  char url[256];
+  int status = 0;
+  int n = 0;
+  if (!video_id || !id_ok(video_id) || !out || max < 1) return -1;
+  snprintf(url, sizeof url, "https://music.youtube.com/youtubei/v1/next?key=%s&prettyPrint=false",
+           INNERTUBE_KEY);
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+           "\"clientVersion\":\"1.20261009.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "\"videoId\":\"%s\",\"playlistId\":\"RDAMVM%s\",\"isAudioOnly\":true}",
+           video_id, video_id);
+  if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/", NULL,
+                   NULL, 0, 1, &status, err, err_n) < 0 ||
+      status != 200 || !g_resp || !g_resp[0]) {
+    if (!err[0]) snprintf(err, (size_t)err_n, "No mix for that song");
+    return -1;
+  }
+  walk_kind(g_resp, "\"playlistPanelVideoRenderer\":", out, &n, max, parse_panel);
+  if (n == 0) snprintf(err, (size_t)err_n, "No mix for that song");
   else err[0] = 0;
   return n;
 }
@@ -1483,8 +1580,10 @@ static void name_mixes(const Track *mixes, int n) {
     snprintf(g_mix_heading, sizeof g_mix_heading, "Playlists");
 }
 
-/* WEB_REMIX plus this device token is HTTP 400. Liked songs already use TVHTML5,
- * so signed-in home uses that client, then the Android music client. */
+/* FEmusic_home is not a TV browse id. TVHTML5 answers HTTP 400 for it with or
+ * without a token. The current Android Music client serves that page. If the
+ * token is refused there, liked songs and the library use the TV client,
+ * which is the client this sign-in belongs to. */
 static int append_ctoken(char *url, int url_n, const char *ctoken) {
   size_t ulen;
   size_t clen;
@@ -1497,6 +1596,42 @@ static int append_ctoken(char *url, int url_n, const char *ctoken) {
   return 1;
 }
 
+static int post_android_home(const char *ctoken, int *status, char *err, int err_n) {
+  char body[640];
+  char url[4096];
+  int skip, skip_user, n;
+  snprintf(url, sizeof url, "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false",
+           INNERTUBE_KEY);
+  append_ctoken(url, (int)sizeof url, ctoken);
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\","
+           "\"clientVersion\":\"9.40.51\",\"hl\":\"en\",\"gl\":\"US\",\"androidSdkVersion\":33}},"
+           "\"browseId\":\"FEmusic_home\"}");
+  skip = g_skip_visitor;
+  skip_user = g_skip_authuser;
+  g_skip_visitor = 1;
+  g_skip_authuser = 1;
+  n = http_post_ex(url, body,
+                   "com.google.android.apps.youtube.music/9.40.51 (Linux; U; Android 13) gzip",
+                   "https://music.youtube.com", "https://music.youtube.com/", NULL, NULL, 1, 1,
+                   status, err, err_n);
+  g_skip_visitor = skip;
+  g_skip_authuser = skip_user;
+  return n;
+}
+
+static int post_tv_id(const char *browse_id, int *status, char *err, int err_n) {
+  char body[512];
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
+           "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "\"browseId\":\"%s\"}",
+           TV_VER, browse_id);
+  return http_post_ex("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", body, TV_UA,
+                      "https://www.youtube.com", "https://www.youtube.com/tv", "7", TV_VER, 1, 1,
+                      status, err, err_n);
+}
+
 static void note_home_http(int status, int *bad, char *msg, int msg_n) {
   char next[120];
   if (status <= 0 || status == 200 || !bad || !msg || msg_n < 8) return;
@@ -1505,35 +1640,6 @@ static void note_home_http(int status, int *bad, char *msg, int msg_n) {
   if (g_resp && g_resp[0]) json_string(g_resp, "message", next, (int)sizeof next);
   if (strstr(next, "ya29") || strstr(next, "Bearer") || strstr(next, "refresh_token")) next[0] = 0;
   if (next[0]) snprintf(msg, (size_t)msg_n, "%s", next);
-}
-
-static int post_tv_home(const char *ctoken, int *status, char *err, int err_n) {
-  char body[512];
-  char url[4096];
-  snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false");
-  append_ctoken(url, (int)sizeof url, ctoken);
-  snprintf(body, sizeof body,
-           "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
-           "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},"
-           "\"browseId\":\"FEmusic_home\"}",
-           TV_VER);
-  return http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
-                      TV_VER, 1, 1, status, err, err_n);
-}
-
-static int post_android_home(const char *ctoken, int *status, char *err, int err_n) {
-  char body[640];
-  char url[4096];
-  snprintf(url, sizeof url, "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false");
-  append_ctoken(url, (int)sizeof url, ctoken);
-  snprintf(body, sizeof body,
-           "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\","
-           "\"clientVersion\":\"7.27.52\",\"hl\":\"en\",\"androidSdkVersion\":30}},"
-           "\"browseId\":\"FEmusic_home\"}");
-  return http_post_ex(
-      url, body, "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 11) gzip",
-      "https://music.youtube.com", "https://music.youtube.com/", "21", "7.27.52", 1, 1, status, err,
-      err_n);
 }
 
 static int fill_account_home(int (*post)(const char *, int *, char *, int), Track *songs,
@@ -1589,12 +1695,36 @@ int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max,
   snprintf(g_place, sizeof g_place, "%s", region);
   if (g_refresh[0] && ensure_access(err, err_n) == 0) authed = 1;
   if (authed) {
-    if (!fill_account_home(post_tv_home, songs, song_max, nsongs, mixes, mix_max, nmixes, &saw_200,
-                           &bad, msg, (int)sizeof msg, err, err_n))
-      fill_account_home(post_android_home, songs, song_max, nsongs, mixes, mix_max, nmixes,
-                        &saw_200, &bad, msg, (int)sizeof msg, err, err_n);
-    if (*nsongs > 0) snprintf(g_song_heading, sizeof g_song_heading, "Quick play");
-    if (*nmixes > 0) name_mixes(mixes, *nmixes);
+    int from_lib = 0;
+    int st = 0;
+    if (!fill_account_home(post_android_home, songs, song_max, nsongs, mixes, mix_max, nmixes,
+                           &saw_200, &bad, msg, (int)sizeof msg, err, err_n)) {
+      from_lib = 1;
+      if (post_tv_id("VLLM", &st, err, err_n) > 0 && st == 200 && g_resp && g_resp[0]) {
+        saw_200 = 1;
+        bad = 0;
+        msg[0] = 0;
+        split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
+      } else if (!saw_200)
+        note_home_http(st, &bad, msg, (int)sizeof msg);
+      if (*nmixes == 0 && post_tv_id("FEmusic_library_landing", &st, err, err_n) > 0 && st == 200 &&
+          g_resp && g_resp[0]) {
+        saw_200 = 1;
+        bad = 0;
+        msg[0] = 0;
+        split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
+      } else if (*nmixes == 0 && !saw_200)
+        note_home_http(st, &bad, msg, (int)sizeof msg);
+    }
+    if (*nsongs > 0)
+      snprintf(g_song_heading, sizeof g_song_heading, "%s",
+               from_lib ? "Liked songs" : "Quick play");
+    if (*nmixes > 0) {
+      if (from_lib)
+        snprintf(g_mix_heading, sizeof g_mix_heading, "Library");
+      else
+        name_mixes(mixes, *nmixes);
+    }
     if (*nsongs + *nmixes == 0) {
       if (saw_200)
         snprintf(err, (size_t)err_n, "No recommendations for this account");
@@ -1948,21 +2078,20 @@ static int cover_fetch_pool(CoverSlot *slots, int nslots, int side, unsigned *ti
     return -1;
   }
   url[0] = 0;
-  if (t->id[0]) {
-    if (hero) {
-      snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/hq720.jpg", t->id);
-      if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
-    }
-    if (!ok) {
-      snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/sddefault.jpg", t->id);
-      if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
-    }
-    if (!ok) {
-      snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/mqdefault.jpg", t->id);
-      if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
-    }
+  if (t->thumb[0] &&
+      (strstr(t->thumb, "googleusercontent.com") || strstr(t->thumb, "ggpht.com"))) {
+    if (try_jpeg(t->thumb, buf, dst, side) == 0) ok = 1;
   }
-  if (!ok && t->thumb[0] && !( !hero && strstr(t->thumb, "hq720"))) {
+  if (!ok && t->id[0]) {
+    snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/hq720.jpg", t->id);
+    if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
+  }
+  if (!ok && t->id[0]) {
+    snprintf(url, sizeof url, "https://i.ytimg.com/vi/%s/maxresdefault.jpg", t->id);
+    if (try_jpeg(url, buf, dst, side) == 0) ok = 1;
+  }
+  if (!ok && t->thumb[0] && !strstr(t->thumb, "hqdefault") && !strstr(t->thumb, "sddefault") &&
+      !strstr(t->thumb, "mqdefault")) {
     if (try_jpeg(t->thumb, buf, dst, side) == 0) ok = 1;
   }
   if (ok) {

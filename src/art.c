@@ -31,8 +31,21 @@
 #pragma GCC diagnostic pop
 #endif
 
+static int edge_bar(const unsigned char *px, int w, int h, int y) {
+  int x, dark = 0, n = 0;
+  const unsigned char *row;
+  if (y < 0 || y >= h) return 0;
+  row = px + (size_t)y * (size_t)w * 4u;
+  for (x = 0; x < w; x += 2) {
+    int lum = row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2];
+    if (lum < 28) dark++;
+    n++;
+  }
+  return n > 0 && dark * 10 >= n * 9;
+}
+
 int art_jpeg_square(const unsigned char *jpg, int n, unsigned char *dst, int side) {
-  int w = 0, h = 0, comp = 0, crop, x0, y0, y, x;
+  int w = 0, h = 0, comp = 0, crop, x0, y0, y, x, top, bot, left, right, iw, ih;
   unsigned char *px;
   if (!jpg || n < 4 || !dst || side < 1) return -1;
   if (jpg[0] != 0xff || jpg[1] != 0xd8) return -1;
@@ -41,9 +54,30 @@ int art_jpeg_square(const unsigned char *jpg, int n, unsigned char *dst, int sid
     if (px) stbi_image_free(px);
     return -1;
   }
-  crop = w < h ? w : h;
-  x0 = (w - crop) / 2;
-  y0 = (h - crop) / 2;
+  /* YouTube's 4:3 thumbnails letterbox a 16:9 frame. Drop those black bands. */
+  top = 0;
+  bot = h;
+  while (top < h / 3 && edge_bar(px, w, h, top)) top++;
+  while (bot > top + h / 2 && edge_bar(px, w, h, bot - 1)) bot--;
+  if (top < 8 && h - bot < 8) {
+    top = 0;
+    bot = h;
+  }
+  left = 0;
+  right = w;
+  iw = right - left;
+  ih = bot - top;
+  if (iw < 8 || ih < 8) {
+    top = 0;
+    bot = h;
+    left = 0;
+    right = w;
+    iw = w;
+    ih = h;
+  }
+  crop = iw < ih ? iw : ih;
+  x0 = left + (iw - crop) / 2;
+  y0 = top + (ih - crop) / 2;
   for (y = 0; y < side; y++) {
     int sy = y0 + (y * crop) / side;
     if (sy >= h) sy = h - 1;

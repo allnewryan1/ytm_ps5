@@ -49,7 +49,7 @@ static const char *moods[][2] = {
     {"Energy", "workout electronic"},
     {"Hip-hop", "hip hop mix"},
     {"Jazz", "jazz instrumental"},
-    {"Rock", "rock hits"},
+    {"Rock", "rock"},
     {"Pop", "pop hits"},
     {"Night", "late night drive"},
 };
@@ -221,7 +221,9 @@ static void fmt_time(char *d, int n, int sec) {
 
 static void fit(char *dst, int n, const char *src, int scale, int max_px) {
   int full;
-  snprintf(dst, (size_t)n, "%s", src ? src : "");
+  if (!dst || n < 1) return;
+  /* Callers pass the same buffer as src after writing it. Copying onto itself is undefined. */
+  if (dst != src) snprintf(dst, (size_t)n, "%s", src ? src : "");
   if (text_px(dst, scale) <= max_px) return;
   full = (int)strlen(dst);
   while (dst[0] && text_px(dst, scale) > max_px) dst[strlen(dst) - 1] = 0;
@@ -266,12 +268,12 @@ static void auth_load(void) {
 static void paint(void);
 static void keep_sel_visible(int n);
 
-static void do_search(const char *q) {
+static void do_search(const char *q, int fill_bar) {
   char err[192];
   int n;
   int from = g_body;
   if (from != BODY_LIST && from != BODY_SEARCH) remember_here();
-  snprintf(g_query, sizeof g_query, "%s", q);
+  if (fill_bar) snprintf(g_query, sizeof g_query, "%s", q);
   snprintf(g_list_title, sizeof g_list_title, "%s", q);
   set_status("Searching YouTube Music...");
   paint();
@@ -337,13 +339,43 @@ static int queue_find(const char *id) {
   return -1;
 }
 
-/* A song that is not already queued replaces the queue. One that is queued just jumps to it. */
+/* A song already in the queue jumps to it. A new song starts that song's radio
+ * mix. Add to queue is the path that appends only the one song. */
+static void lead_with(Track *list, int *n, const Track *seed) {
+  int i;
+  Track hold;
+  if (!list || !n || *n < 1 || !seed || !seed->id[0]) return;
+  for (i = 0; i < *n; i++) {
+    if (list[i].id[0] && strcmp(list[i].id, seed->id) == 0) break;
+  }
+  if (i == *n) {
+    if (*n >= YTM_TRACK_CAP) *n = YTM_TRACK_CAP - 1;
+    memmove(list + 1, list, (size_t)(*n) * sizeof(Track));
+    list[0] = *seed;
+    (*n)++;
+    return;
+  }
+  if (i == 0) return;
+  hold = list[i];
+  memmove(list + 1, list, (size_t)i * sizeof(Track));
+  list[0] = hold;
+}
+
 static void play_one(const Track *t) {
-  int at;
+  char err[192];
+  int at, n;
   if (!t || !t->id[0]) return;
   at = queue_find(t->id);
   if (at >= 0) {
     play_queue_index(at);
+    return;
+  }
+  set_status("Starting a mix...");
+  paint();
+  n = ytm_radio(t->id, g_scratch, YTM_TRACK_CAP, err, (int)sizeof err);
+  if (n > 0) {
+    lead_with(g_scratch, &n, t);
+    play_list(g_scratch, n, 0);
     return;
   }
   g_queue[0] = *t;
@@ -715,8 +747,15 @@ static void on_activate(void) {
       g_body = BODY_HOME;
       if (!home_ready()) load_home();
     } else if (g_nav == NAV_SEARCH) {
+      int i;
       g_body = BODY_SEARCH;
       g_player_ui = 0;
+      for (i = 0; i < 8; i++) {
+        if (g_query[0] && strcmp(g_query, moods[i][1]) == 0) {
+          g_query[0] = 0;
+          break;
+        }
+      }
       set_status("");
     } else if (g_nav == NAV_EXPLORE) {
       g_body = BODY_EXPLORE;
@@ -738,7 +777,7 @@ static void on_activate(void) {
       if (g_home_sec == 0 && g_nquick > 0) play_or_open(g_quick, g_nquick, g_quick_sel);
       else if (g_nmixes > 0) play_or_open(g_mixes, g_nmixes, g_mix_sel);
     } else {
-      do_search(moods[g_home][1]);
+      do_search(moods[g_home][1], 0);
       if (g_nresults > 0) play_list(g_results, g_nresults, 0);
     }
   } else if (g_body == BODY_EXPLORE) {
@@ -781,7 +820,7 @@ static void on_activate(void) {
     } else if (g_keyc == 2) {
       g_query[0] = 0;
     } else if (g_query[0]) {
-      do_search(g_query);
+      do_search(g_query, 1);
     }
   }
 }
@@ -1133,6 +1172,16 @@ static void draw_hints(Draw *d) {
   draw_text(d, 28, HINT_Y + 16, 1, M3_ON_SURFACE_VAR, s);
 }
 
+static void subline(char *dst, int n, const Track *t) {
+  const char *a = (t && t->artist[0]) ? t->artist : "";
+  if (t && t->video && a[0])
+    snprintf(dst, (size_t)n, "Video · %s", a);
+  else if (t && t->video)
+    snprintf(dst, (size_t)n, "Video");
+  else
+    snprintf(dst, (size_t)n, "%s", a);
+}
+
 /* first_row is the first visible row of a 2-column grid. Returns y after the last row. */
 static int draw_two_col(Draw *d, char *line, int line_n, const Track *items, int n,
                         int sel_idx, int selected, int first_row, int x0, int y, int rows) {
@@ -1149,7 +1198,8 @@ static int draw_two_col(Draw *d, char *line, int line_n, const Track *items, int
       draw_track_art(d, x, yy, 56, &items[idx]);
       fit(line, line_n, items[idx].title, 1, 640);
       draw_text(d, x + 68, yy + 2, 1, M3_ON_SURFACE, line);
-      fit(line, line_n, items[idx].artist, 1, 400);
+      subline(line, line_n, &items[idx]);
+      fit(line, line_n, line, 1, 400);
       draw_text(d, x + 68, yy + 30, 1, M3_ON_SURFACE_VAR, line);
     }
   }
@@ -1199,7 +1249,8 @@ static void paint(void) {
     draw_track_art(&d, 72, 112, 280, now);
     fit(line, (int)sizeof line, now->title, 2, 860);
     draw_text(&d, 72, 412, 2, M3_ON_SURFACE, line);
-    fit(line, (int)sizeof line, now->artist, 1, 860);
+    subline(line, (int)sizeof line, now);
+    fit(line, (int)sizeof line, line, 1, 860);
     draw_text(&d, 72, 482, 1, M3_ON_SURFACE_VAR, line);
     if (now->album[0]) {
       fit(line, (int)sizeof line, now->album, 1, 860);
@@ -1239,7 +1290,8 @@ static void paint(void) {
       draw_track_art(&d, 1016, y, 64, &g_queue[idx]);
       fit(line, (int)sizeof line, g_queue[idx].title, 1, 680);
       draw_text(&d, 1096, y + 4, 1, M3_ON_SURFACE, line);
-      fit(line, (int)sizeof line, g_queue[idx].artist, 1, 480);
+      subline(line, (int)sizeof line, &g_queue[idx]);
+      fit(line, (int)sizeof line, line, 1, 480);
       draw_text(&d, 1096, y + 36, 1, M3_ON_SURFACE_VAR, line);
     }
     draw_hints(&d);
@@ -1457,7 +1509,8 @@ static void paint(void) {
       draw_track_art(&d, RAIL + 36, y, 84, &list[idx]);
       fit(line, (int)sizeof line, list[idx].title, 1, 1100);
       draw_text(&d, RAIL + 140, y + 8, 1, M3_ON_SURFACE, line);
-      fit(line, (int)sizeof line, list[idx].artist, 1, 900);
+      subline(line, (int)sizeof line, &list[idx]);
+      fit(line, (int)sizeof line, line, 1, 900);
       draw_text(&d, RAIL + 140, y + 46, 1, M3_ON_SURFACE_VAR, line);
       if (list[idx].seconds > 0) {
         fmt_time(time, (int)sizeof time, list[idx].seconds);
@@ -1478,7 +1531,13 @@ static void paint(void) {
     draw_track_art(&d, 36, BAR_Y + 18, 72, now);
     fit(line, (int)sizeof line, now->title, 1, 400);
     draw_text(&d, 124, BAR_Y + 20, 1, M3_ON_SURFACE, line);
-    fit(line, (int)sizeof line, sub, 1, 400);
+    if (now->video && sub[0])
+      snprintf(line, sizeof line, "Video · %s", sub);
+    else if (now->video)
+      snprintf(line, sizeof line, "Video");
+    else
+      snprintf(line, sizeof line, "%s", sub);
+    fit(line, (int)sizeof line, line, 1, 400);
     draw_text(&d, 124, BAR_Y + 54, 1, M3_ON_SURFACE_VAR, line);
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);

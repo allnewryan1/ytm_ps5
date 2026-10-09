@@ -17,6 +17,7 @@ typedef struct Track {
   char album[YTM_TITLE_LEN];
   char thumb[YTM_THUMB_LEN];
   int seconds;
+  int video; /* 1 when YouTube marks the row as a video, not an audio track */
 } Track;
 
 #endif

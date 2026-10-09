@@ -29,6 +29,9 @@ int ytm_signed_in(void);
 const char *ytm_refresh_token(void);
 void ytm_set_refresh_token(const char *token);
 
+/* Song radio (RDAMVM + the video id). 0-length means YouTube returned no mix. */
+int ytm_radio(const char *video_id, Track *out, int max, char *err, int err_n);
+
 /* Liked songs for the signed-in account. */
 int ytm_liked(Track *out, int max, char *err, int err_n);
 

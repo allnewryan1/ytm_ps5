@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+- Signed-in For you no longer asks the TV client for FEmusic_home. That browse id is HTTP 400 with or without a token. Home tries the current Android Music client. If that page is empty or refused, liked songs and the library load on the TV client instead of leaving the 400 on screen.
+- The search bar no longer keeps a shelf query. Rock is not prefilled as "rock hits".
+- Covers prefer the square catalog image and drop the black bars above and below a letterboxed frame.
+- Playing a song that is not already in the queue starts that song's radio mix. Add to queue still adds only that song.
+- A song is not marked finished while decoded audio is still waiting to play, and a read that stops more than a few seconds early is tried again.
+- Volume is applied as the samples play, so L2 and R2 do not wait on audio that was already queued.
+- A row YouTube marks as a video, rather than an audio track, is labeled Video.
+
 ## 0.7.0
 
 - Signed-in For you no longer calls the music web client with the device token. That call is the HTTP 400. Home now uses the TV client, the same one that loads the library, and then the Android music client if the TV page is empty. Charts are still only for signed-out home.
