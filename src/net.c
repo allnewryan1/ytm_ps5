@@ -665,10 +665,23 @@ static void parse_tile(const char *s, const char *end, Track *t) {
 }
 
 static int good_browse(const char *id) {
-  if (!id || strlen(id) < 2 || strlen(id) >= YTM_BROWSE_LEN) return 0;
-  if (strncmp(id, "VL", 2) == 0 || strncmp(id, "MP", 2) == 0 || strncmp(id, "FE", 2) == 0 ||
-      strncmp(id, "OL", 2) == 0)
-    return 1;
+  size_t n;
+  if (!id) return 0;
+  n = strlen(id);
+  if (n < 4 || n >= YTM_BROWSE_LEN) return 0;
+  /* Playlists browse as VL…, albums as MPREb_. Podcasts (MPSP) and channels are not shelves. */
+  if (strncmp(id, "VL", 2) == 0) return 1;
+  if (strncmp(id, "MPREb_", 6) == 0) return 1;
+  return 0;
+}
+
+static int bad_page(const char *s, const char *end) {
+  const char *p = find_bounded(s, end, "\"pageType\":\"");
+  if (!p) return 0;
+  p += 12;
+  if (strncmp(p, "MUSIC_PAGE_TYPE_PODCAST", 23) == 0) return 1;
+  if (strncmp(p, "MUSIC_PAGE_TYPE_ARTIST", 22) == 0) return 1;
+  if (strncmp(p, "MUSIC_PAGE_TYPE_USER_CHANNEL", 28) == 0) return 1;
   return 0;
 }
 
@@ -678,8 +691,10 @@ static void parse_two(const char *s, const char *end, Track *t) {
   const char *title = find_bounded(s, lim, "\"title\":");
   const char *sub = find_bounded(s, lim, "\"subtitle\":");
   const char *bid = NULL;
+  const char *vid;
   const char *p = s;
   char url[300];
+  if (bad_page(s, lim)) return;
   while ((p = find_bounded(p, lim, "\"browseId\":\"")) != NULL) {
     char id[YTM_BROWSE_LEN];
     copy_json_str(p + 12, id, (int)sizeof id);
@@ -690,7 +705,9 @@ static void parse_two(const char *s, const char *end, Track *t) {
       break;
     }
   }
-  if (!t->browse[0]) return;
+  vid = find_bounded(s, lim, "\"videoId\":\"");
+  if (vid) take_vid(vid + 11, lim, t->id);
+  if (!t->browse[0] && !t->id[0]) return;
   (void)bid;
   if (title) {
     const char *obj = strchr(title, '{');
@@ -1124,25 +1141,31 @@ static int ensure_access(char *err, int err_n) {
   return ytm_auth_refresh(err, err_n);
 }
 
-static int remix_browse(const char *browse_id, int authed, Track *out, int max, char *err,
-                         int err_n) {
-  char body[640];
+static int remix_browse_gl(const char *browse_id, const char *gl, int authed, Track *out, int max,
+                           char *err, int err_n) {
+  char body[768];
   char url[256];
   int status = 0;
   int n;
+  const char *cc = (gl && gl[0] && gl[1]) ? gl : "US";
   snprintf(url, sizeof url,
            "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
   snprintf(body, sizeof body,
            "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-           "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"%s\"}},"
            "\"browseId\":\"%s\"}",
-           browse_id);
+           cc, browse_id);
   if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
                    NULL, NULL, authed, 0, &status, err, err_n) < 0)
     return -1;
   n = collect_tracks(g_resp, out, max);
   if (n == 0) snprintf(err, (size_t)err_n, "Nothing in that shelf");
   return n;
+}
+
+static int remix_browse(const char *browse_id, int authed, Track *out, int max, char *err,
+                        int err_n) {
+  return remix_browse_gl(browse_id, "US", authed, out, max, err, err_n);
 }
 
 int ytm_browse(const char *browse_id, Track *out, int max, char *err, int err_n) {
@@ -1199,25 +1222,73 @@ static int keep_mixes(Track *a, int n) {
   return w;
 }
 
+/* Home and charts browse ids match ytmusicapi get_home / get_charts. See NOTICE. */
+static char g_song_heading[40];
+static char g_mix_heading[40];
+static char g_place[8];
+static int lookup_region(char *cc, int n);
+
+const char *ytm_home_song_heading(void) {
+  return g_song_heading[0] ? g_song_heading : "Quick play";
+}
+const char *ytm_home_mix_heading(void) { return g_mix_heading[0] ? g_mix_heading : "Playlists"; }
+const char *ytm_home_place(void) {
+  if (strcmp(g_place, "ZZ") == 0) return "Global";
+  return g_place;
+}
+
+static int chart_rank(const Track *t) {
+  if (!t || !t->title[0] || !t->browse[0]) return -1;
+  if (strstr(t->title, "Podcast")) return -1;
+  if (strstr(t->title, "Top 100 Music Videos")) return 50;
+  if (strstr(t->title, "Daily Top")) return 40;
+  if (strstr(t->title, "Trending")) return 20;
+  if (strstr(t->title, "Live Performances")) return 10;
+  return 1;
+}
+
+static void split_home(const char *json, Track *songs, int song_max, int *nsongs, Track *mixes,
+                       int mix_max, int *nmixes) {
+  int n = 0;
+  walk_kind(json, "\"musicResponsiveListItemRenderer\":", songs, &n, song_max, parse_mrlir);
+  walk_kind(json, "\"musicCardShelfRenderer\":", songs, &n, song_max, parse_card);
+  walk_kind(json, "\"tileRenderer\":", songs, &n, song_max, parse_tile);
+  walk_kind(json, "\"musicTwoRowItemRenderer\":", songs, &n, song_max, parse_two);
+  *nsongs = keep_ids(songs, n);
+  n = 0;
+  walk_kind(json, "\"musicTwoRowItemRenderer\":", mixes, &n, mix_max, parse_two);
+  *nmixes = keep_mixes(mixes, n);
+}
+
 int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max, int *nmixes,
-            char *err, int err_n) {
-  char body[640];
+             char *err, int err_n) {
+  char body[768];
   char url[256];
+  char region[4];
+  Track charts[12];
   int status = 0;
   int n;
+  int ncharts = 0;
   int authed = 0;
   int got = 0;
+  int best = -1;
+  int bi = 0;
   if (nsongs) *nsongs = 0;
   if (nmixes) *nmixes = 0;
+  g_song_heading[0] = 0;
+  g_mix_heading[0] = 0;
   if (!songs || !mixes || song_max < 1 || mix_max < 1) return -1;
+  if (lookup_region(region, (int)sizeof region) != 0) snprintf(region, sizeof region, "ZZ");
+  snprintf(g_place, sizeof g_place, "%s", region);
   if (g_refresh[0] && ensure_access(err, err_n) == 0) authed = 1;
+  /* Same browse id as ytmusicapi YTMusic.get_home. */
   if (authed) {
     snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false");
     snprintf(body, sizeof body,
              "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
-             "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},"
+             "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
              "\"browseId\":\"FEmusic_home\"}",
-             TV_VER);
+             TV_VER, region);
     if (http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
                      TV_VER, 1, 1, &status, err, err_n) > 0 &&
         status == 200 && g_resp && g_resp[0])
@@ -1228,25 +1299,55 @@ int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max,
              "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
     snprintf(body, sizeof body,
              "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-             "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
-             "\"browseId\":\"FEmusic_home\"}");
+             "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+             "\"browseId\":\"FEmusic_home\"}",
+             region);
     if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
-                     NULL, NULL, 0, 0, &status, err, err_n) < 0)
-      return -1;
+                     NULL, NULL, 0, 1, &status, err, err_n) > 0 &&
+        status == 200 && g_resp && g_resp[0])
+      got = 1;
   }
-  n = 0;
-  walk_kind(g_resp, "\"musicResponsiveListItemRenderer\":", songs, &n, song_max, parse_mrlir);
-  walk_kind(g_resp, "\"musicCardShelfRenderer\":", songs, &n, song_max, parse_card);
-  walk_kind(g_resp, "\"tileRenderer\":", songs, &n, song_max, parse_tile);
-  n = keep_ids(songs, n);
-  *nsongs = n;
-  n = 0;
-  walk_kind(g_resp, "\"musicTwoRowItemRenderer\":", mixes, &n, mix_max, parse_two);
-  n = keep_mixes(mixes, n);
-  *nmixes = n;
-  if (*nsongs == 0) {
-    n = remix_browse("VLPL4fGSI1pDJn4yCNzulPkUbxgr4pl0gmI-", 0, songs, song_max, err, err_n);
-    if (n > 0) *nsongs = keep_ids(songs, n);
+  if (got) split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
+  if (*nsongs > 0) snprintf(g_song_heading, sizeof g_song_heading, "Quick play");
+  if (*nmixes > 0) snprintf(g_mix_heading, sizeof g_mix_heading, "Playlists");
+  /* Country charts when home has no songs or no playlists. Same request as get_charts. */
+  if (*nsongs == 0 || *nmixes == 0) {
+    snprintf(url, sizeof url,
+             "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
+    snprintf(body, sizeof body,
+             "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+             "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"%s\"}},"
+             "\"browseId\":\"FEmusic_charts\",\"formData\":{\"selectedValues\":[\"%s\"]}}",
+             region, region);
+    if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
+                     NULL, NULL, 0, 1, &status, err, err_n) > 0 &&
+        status == 200 && g_resp && g_resp[0]) {
+      n = 0;
+      walk_kind(g_resp, "\"musicTwoRowItemRenderer\":", charts, &n, 12, parse_two);
+      ncharts = keep_mixes(charts, n);
+    }
+  }
+  if (*nmixes == 0 && ncharts > 0) {
+    if (ncharts > mix_max) ncharts = mix_max;
+    memcpy(mixes, charts, (size_t)ncharts * sizeof(Track));
+    *nmixes = ncharts;
+    snprintf(g_mix_heading, sizeof g_mix_heading, "Playlists");
+  }
+  if (*nsongs == 0 && ncharts > 0) {
+    for (n = 0; n < ncharts; n++) {
+      int rank = chart_rank(&charts[n]);
+      if (rank > best) {
+        best = rank;
+        bi = n;
+      }
+    }
+    if (best > 0) {
+      n = remix_browse_gl(charts[bi].browse, region, 0, songs, song_max, err, err_n);
+      if (n > 0) {
+        *nsongs = keep_ids(songs, n);
+        snprintf(g_song_heading, sizeof g_song_heading, "Top songs");
+      }
+    }
   }
   if (*nsongs + *nmixes == 0) {
     if (!err[0]) snprintf(err, (size_t)err_n, "No recommendations");
@@ -1310,9 +1411,6 @@ void ytm_prefetch_drop(const char *video_id) {
   slot->ready = 0;
   slot->url[0] = 0;
 }
-
-static char g_pending[8192];
-#define AUDIO_CAP (24 * 1024 * 1024)
 
 static int http_get_hdr(const char *url, unsigned char *buf, int cap, int *status, const char *ua,
                         const char *ref);
@@ -1404,33 +1502,67 @@ static int http_get_hdr(const char *url, unsigned char *buf, int cap, int *statu
   return -1;
 }
 
-const char *ytm_pending_url(void) { return g_pending; }
-
-int ytm_audio_prepare(const char *video_id, unsigned char **out, int *out_n, int *duration,
-                      char *err, int err_n) {
-  unsigned char *buf;
+static int lookup_region(char *cc, int n) {
+  unsigned char buf[512];
   int status = 0;
-  int n;
-  int dur = 0;
-  if (out) *out = NULL;
-  if (out_n) *out_n = 0;
-  if (duration) *duration = 0;
-  g_pending[0] = 0;
-  if (!video_id || !video_id[0] || !out || !out_n) return -1;
-  if (ytm_audio_url(video_id, g_pending, (int)sizeof g_pending, &dur, err, err_n) != 0) return -1;
-  if (duration) *duration = dur;
-  buf = (unsigned char *)malloc(AUDIO_CAP);
-  if (!buf) return 0;
-  n = http_get_hdr(g_pending, buf, AUDIO_CAP, &status, ytm_stream_ua(), ytm_stream_referer());
-  if (n > 2048 && n < AUDIO_CAP - 64 && buf[4] == 'f' && buf[5] == 't' && buf[6] == 'y' &&
-      buf[7] == 'p') {
-    *out = buf;
-    *out_n = n;
-    err[0] = 0;
+  int got;
+  const char *p;
+  char a, b;
+  if (!cc || n < 3) return -1;
+  cc[0] = 0;
+  if (g_place[0] && strcmp(g_place, "ZZ") != 0 && strlen(g_place) == 2) {
+    snprintf(cc, (size_t)n, "%s", g_place);
     return 0;
   }
-  free(buf);
-  err[0] = 0;
+  got = http_get_hdr("https://www.cloudflare.com/cdn-cgi/trace", buf, (int)sizeof buf, &status,
+                     "Mozilla/5.0", NULL);
+  if (got < 8 || status != 200) return -1;
+  if (got >= (int)sizeof buf) got = (int)sizeof buf - 1;
+  buf[got] = 0;
+  p = strstr((char *)buf, "loc=");
+  if (!p) return -1;
+  a = p[4];
+  b = p[5];
+  if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
+  if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
+  if (!((a >= 'A' && a <= 'Z') && (b >= 'A' && b <= 'Z'))) return -1;
+  cc[0] = a;
+  cc[1] = b;
+  cc[2] = 0;
+  return 0;
+}
+
+int ytm_stream_follow(char *url, int url_n) {
+  char cur[8192];
+  char next[8192];
+  int hop;
+  if (!url || !url[0] || url_n < 16 || g_tmpl < 0) return -1;
+  snprintf(cur, sizeof cur, "%s", url);
+  for (hop = 0; hop < 3; hop++) {
+    int req, code = 0;
+    req = sceHttp2CreateRequestWithURL(g_tmpl, "GET", cur, 0);
+    if (req < 0) return -1;
+    sceHttp2SetAutoRedirect(req, 0);
+    sceHttp2AddRequestHeader(req, "Accept", "*/*", SCE_HTTP_HEADER_OVERWRITE);
+    sceHttp2AddRequestHeader(req, "User-Agent", ytm_stream_ua(), SCE_HTTP_HEADER_OVERWRITE);
+    sceHttp2AddRequestHeader(req, "Referer", ytm_stream_referer(), SCE_HTTP_HEADER_OVERWRITE);
+    sceHttp2AddRequestHeader(req, "Range", "bytes=0-0", SCE_HTTP_HEADER_OVERWRITE);
+    if (sceHttp2SendRequest(req, "", 0) != 0) {
+      sceHttp2DeleteRequest(req);
+      return -1;
+    }
+    sceHttp2GetStatusCode(req, &code);
+    if ((code == 301 || code == 302 || code == 303 || code == 307 || code == 308) &&
+        header_location(req, next, (int)sizeof next) == 0 && strncmp(next, "https://", 8) == 0) {
+      sceHttp2DeleteRequest(req);
+      snprintf(cur, sizeof cur, "%s", next);
+      continue;
+    }
+    /* Leave the body unread so the UI thread does not copy the song. */
+    sceHttp2DeleteRequest(req);
+    break;
+  }
+  snprintf(url, (size_t)url_n, "%s", cur);
   return 0;
 }
 

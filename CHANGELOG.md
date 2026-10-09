@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Songs stream. The console does not download the file first, so the screen is not stuck while the track copies. The stream address is followed to the host that serves the audio, and the file itself is left for the player.
+- For you reads the YouTube Music home browse. Songs land under Quick play and playlists under Playlists. Podcasts and artist rows are skipped.
+- Signed out, the country comes from the console's IP. Charts for that country supply the songs and the playlists.
+
 ## 0.3.0
 
 - Songs download as a file and then play, so a redirect from the audio host is followed before the decoder opens the stream. If the file is too large, playback falls back to the stream URL.

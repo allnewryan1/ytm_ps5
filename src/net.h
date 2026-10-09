@@ -32,15 +32,16 @@ void ytm_set_refresh_token(const char *token);
 /* Liked songs for the signed-in account. */
 int ytm_liked(Track *out, int max, char *err, int err_n);
 
-/* Home feed. Songs and playlists are filled separately. 0 if either side has rows. */
+/* Home feed. Songs and playlists are filled separately. 0 if either side has rows.
+ * Headings name the two columns. Place is a country code, or "Global". */
 int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max, int *nmixes,
              char *err, int err_n);
+const char *ytm_home_song_heading(void);
+const char *ytm_home_mix_heading(void);
+const char *ytm_home_place(void);
 
-/* Download the audio for video_id. On success *out is a malloc'd file the caller owns.
- * If the file could not be saved but a stream URL exists, returns 0 with *out NULL. */
-int ytm_audio_prepare(const char *video_id, unsigned char **out, int *out_n, int *duration,
-                      char *err, int err_n);
-const char *ytm_pending_url(void);
+/* Rewrite url to the host that serves the audio. Headers only; the file is not read. */
+int ytm_stream_follow(char *url, int url_n);
 
 /* Download one cover into the cache. Safe to call again. */
 int ytm_cover_fetch(const Track *t);

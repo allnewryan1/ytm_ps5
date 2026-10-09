@@ -270,32 +270,23 @@ static void do_search(const char *q) {
 
 static void play_queue_index(int idx) {
   char err[192];
-  unsigned char *bytes = NULL;
-  int nbytes = 0;
+  char url[8192];
   int dur = 0;
-  const char *pending;
   if (idx < 0 || idx >= g_nqueue) return;
   snprintf(g_status, sizeof g_status, "Opening %s", g_queue[idx].title);
   paint();
-  if (ytm_audio_prepare(g_queue[idx].id, &bytes, &nbytes, &dur, err, (int)sizeof err) != 0) {
+  if (ytm_audio_url(g_queue[idx].id, url, (int)sizeof url, &dur, err, (int)sizeof err) != 0) {
     set_status(err);
     toast(err);
     return;
   }
   if (dur > 0) g_queue[idx].seconds = dur;
-  if (bytes) {
-    if (player_start_mem(bytes, nbytes, g_queue[idx].seconds) != 0) {
-      set_status(player_error()[0] ? player_error() : "Playback failed");
-      toast(g_status);
-      return;
-    }
-  } else {
-    pending = ytm_pending_url();
-    if (!pending || !pending[0] || player_start(pending, g_queue[idx].seconds) != 0) {
-      set_status(player_error()[0] ? player_error() : "Playback failed");
-      toast(g_status);
-      return;
-    }
+  /* Headers only. The decoder streams the file on its own thread. */
+  ytm_stream_follow(url, (int)sizeof url);
+  if (player_start(url, g_queue[idx].seconds) != 0) {
+    set_status(player_error()[0] ? player_error() : "Playback failed");
+    toast(g_status);
+    return;
   }
   g_qindex = idx;
   g_qpick = idx;
@@ -446,9 +437,7 @@ static void load_home(void) {
   if (g_home_try && home_ready()) return;
   if (g_home_try && !ytm_signed_in()) return;
   g_home_try = 1;
-  if (!ytm_signed_in() && !(ytm_refresh_token()[0] && ytm_auth_refresh(err, (int)sizeof err) == 0))
-    return;
-  set_status("Loading your home...");
+  set_status(ytm_signed_in() ? "Loading your home..." : "Loading charts...");
   paint();
   if (ytm_home(g_quick, 18, &ns, g_mixes, 12, &nm, err, (int)sizeof err) != 0) {
     g_nquick = 0;
@@ -1034,12 +1023,18 @@ static void paint(void) {
       int x0 = RAIL + 28;
       int y = 104;
       int focus = (g_zone == ZONE_BODY);
-      draw_text(&d, x0, 24, 1, 244, 242, 236, "For you");
+      const char *place = ytm_home_place();
+      if (!ytm_signed_in() && place && place[0]) {
+        snprintf(line, sizeof line, "Charts · %s", place);
+        draw_text(&d, x0, 24, 1, 244, 242, 236, line);
+      } else {
+        draw_text(&d, x0, 24, 1, 244, 242, 236, "For you");
+      }
       if (g_status[0]) {
         fit(line, (int)sizeof line, g_status, 1, 500);
         draw_text(&d, 1920 - 40 - text_px(line, 1), 28, 1, 168, 170, 180, line);
       }
-      draw_text(&d, x0, 68, 1, 212, 166, 86, "Quick play");
+      draw_text(&d, x0, 68, 1, 212, 166, 86, ytm_home_song_heading());
       if (g_nquick < 1) {
         draw_text(&d, x0, y, 1, 140, 142, 154, "No songs yet");
         y += 40;
@@ -1054,7 +1049,7 @@ static void paint(void) {
                          x0, y, cap);
       }
       y += 8;
-      draw_text(&d, x0, y, 1, 212, 166, 86, "Playlists");
+      draw_text(&d, x0, y, 1, 212, 166, 86, ytm_home_mix_heading());
       y += 36;
       if (g_nmixes < 1) {
         draw_text(&d, x0, y, 1, 140, 142, 154, "No playlists yet");

@@ -51,15 +51,20 @@ The install folder stays `PPSA99105`. The home screen title is YouTube Music. `e
 | D-pad / left stick | Move |
 | Cross | Open, play, or pause |
 | Circle | Back |
-| Triangle | Now playing |
+| Triangle | Now playing, queue on that card |
 | Options | Search |
 | Touchpad | Cycle repeat: off, all, one |
 | L1 / R1 | Previous / next |
+| L2 / R2 | Volume, while Now playing is open |
 | Left / right on the player | Seek 10 seconds |
-| Up / down on the player | Volume |
+| Up / down on the player | Move through the queue |
 
 A USB keyboard works too: arrows, Enter, Esc, and Backspace.
 
 ## If a song will not play
 
 YouTube sometimes returns a signed stream instead of a direct audio URL, or it refuses the player client. The status line on screen is the actual error. Search still works when the catalog responds. Playback needs a `googlevideo.com` audio URL and an FFmpeg build with HTTPS.
+
+## Notices
+
+Home and charts requests follow the browse identifiers used by [ytmusicapi](https://github.com/sigma67/ytmusicapi) (`FEmusic_home` and `FEmusic_charts`). That project is MIT licensed. The notice is in [NOTICE](NOTICE). This program does not include the Python library.
