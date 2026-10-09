@@ -288,11 +288,14 @@ static char g_refresh[1024];
 static char g_device_code[256];
 static char g_visitor[128];
 static time_t g_access_exp;
-/* Account home must not send the anonymous visitor id. A request-time header
- * matches the web music client used by ytmusicapi's OAuth session. */
 static int g_skip_visitor;
 static int g_send_reqtime;
+static int g_skip_authuser;
 static const char *g_api_format;
+static const char *g_accept;
+static const char *g_cookie;
+static const char *g_visitor_override;
+static char g_music_visitor[128];
 
 static int http_post_ex(const char *url, const char *body, const char *ua, const char *origin,
                          const char *referer, const char *client_name, const char *client_ver,
@@ -312,10 +315,13 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
     return -1;
   }
   sceHttp2AddRequestHeader(req, "Content-Type", "application/json", SCE_HTTP_HEADER_OVERWRITE);
-  sceHttp2AddRequestHeader(req, "Accept", "application/json", SCE_HTTP_HEADER_OVERWRITE);
+  sceHttp2AddRequestHeader(req, "Accept", g_accept && g_accept[0] ? g_accept : "application/json",
+                           SCE_HTTP_HEADER_OVERWRITE);
   if (ua) sceHttp2AddRequestHeader(req, "User-Agent", ua, SCE_HTTP_HEADER_OVERWRITE);
   if (origin) sceHttp2AddRequestHeader(req, "Origin", origin, SCE_HTTP_HEADER_OVERWRITE);
   if (referer) sceHttp2AddRequestHeader(req, "Referer", referer, SCE_HTTP_HEADER_OVERWRITE);
+  if (g_cookie && g_cookie[0])
+    sceHttp2AddRequestHeader(req, "Cookie", g_cookie, SCE_HTTP_HEADER_OVERWRITE);
   if (client_name)
     sceHttp2AddRequestHeader(req, "X-YouTube-Client-Name", client_name, SCE_HTTP_HEADER_OVERWRITE);
   if (client_ver)
@@ -323,7 +329,9 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
   if (g_api_format && g_api_format[0])
     sceHttp2AddRequestHeader(req, "X-Goog-Api-Format-Version", g_api_format,
                              SCE_HTTP_HEADER_OVERWRITE);
-  if (g_visitor[0] && !g_skip_visitor)
+  if (g_visitor_override && g_visitor_override[0])
+    sceHttp2AddRequestHeader(req, "X-Goog-Visitor-Id", g_visitor_override, SCE_HTTP_HEADER_OVERWRITE);
+  else if (g_visitor[0] && !g_skip_visitor)
     sceHttp2AddRequestHeader(req, "X-Goog-Visitor-Id", g_visitor, SCE_HTTP_HEADER_OVERWRITE);
   if (g_send_reqtime) {
     char ts[32];
@@ -334,7 +342,8 @@ static int http_post_ex(const char *url, const char *body, const char *ua, const
     char auth[2100];
     snprintf(auth, sizeof auth, "Bearer %s", g_access);
     sceHttp2AddRequestHeader(req, "Authorization", auth, SCE_HTTP_HEADER_OVERWRITE);
-    sceHttp2AddRequestHeader(req, "X-Goog-AuthUser", "0", SCE_HTTP_HEADER_OVERWRITE);
+    if (!g_skip_authuser)
+      sceHttp2AddRequestHeader(req, "X-Goog-AuthUser", "0", SCE_HTTP_HEADER_OVERWRITE);
   }
   if (sceHttp2SendRequest(req, body, body_n) != 0) {
     sceHttp2DeleteRequest(req);
@@ -1413,84 +1422,59 @@ static void name_mixes(const Track *mixes, int n) {
     snprintf(g_mix_heading, sizeof g_mix_heading, "Playlists");
 }
 
-/* kind 0 is WEB_REMIX with the account token and no visitor id (ytmusicapi OAuth).
- * kind 1 is the Android Music client. kind 2 is the TV client. */
-static int post_account_home(int kind, const char *region, const char *cont, int *status,
-                             char *err, int err_n) {
+/* Signed-in home is ytmusicapi YTMusic.get_home on an OAuth session.
+ * URL is /youtubei/v1/browse?alt=json with no API key. Body is browseId
+ * FEmusic_home plus the WEB_REMIX context. Headers are initialize_headers()
+ * plus Authorization and X-Goog-Request-Time. The next page is the same body
+ * with &ctoken=&continuation= on the query, not a different client. */
+static int ensure_music_visitor(void);
+
+static int post_account_home(const char *ctoken, int *status, char *err, int err_n) {
   char ver[32];
-  char body[4600];
-  char url[280];
-  const char *cc = (region && region[0] && strcmp(region, "ZZ") != 0) ? region : "US";
+  char body[512];
+  char url[4096];
   int skip;
   int rt;
+  int skip_user;
+  const char *accept;
+  const char *cookie;
+  const char *vis;
   int n;
-  const char *use = (cont && cont[0] && (int)strlen(cont) < 3800) ? cont : NULL;
+  size_t ulen;
   web_client_version(ver, (int)sizeof ver);
-  if (kind == 2) {
-    snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false");
-    if (use)
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
-               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
-               "\"continuation\":\"%s\"}",
-               TV_VER, cc, use);
-    else
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
-               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
-               "\"browseId\":\"FEmusic_home\"}",
-               TV_VER, cc);
-  } else if (kind == 1) {
-    snprintf(url, sizeof url, "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false");
-    if (use)
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\","
-               "\"clientVersion\":\"7.27.52\",\"androidSdkVersion\":30,"
-               "\"hl\":\"en\",\"gl\":\"%s\"}},\"continuation\":\"%s\"}",
-               cc, use);
-    else
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\","
-               "\"clientVersion\":\"7.27.52\",\"androidSdkVersion\":30,"
-               "\"hl\":\"en\",\"gl\":\"%s\"}},\"browseId\":\"FEmusic_home\"}",
-               cc);
-  } else {
-    snprintf(url, sizeof url,
-             "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
-    if (use)
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
-               "\"continuation\":\"%s\"}",
-               ver, cc, use);
-    else
-      snprintf(body, sizeof body,
-               "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
-               "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"%s\"}},"
-               "\"browseId\":\"FEmusic_home\"}",
-               ver, cc);
+  ensure_music_visitor();
+  snprintf(url, sizeof url, "https://music.youtube.com/youtubei/v1/browse?alt=json");
+  if (ctoken && ctoken[0] && !strchr(ctoken, '&') && !strchr(ctoken, ' ')) {
+    ulen = strlen(url);
+    if (strlen(ctoken) < 1600 && ulen + strlen(ctoken) * 2 + 32 < sizeof url)
+      snprintf(url + ulen, sizeof url - ulen, "&ctoken=%s&continuation=%s", ctoken, ctoken);
   }
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+           "\"clientVersion\":\"%s\",\"hl\":\"en\"},\"user\":{}},"
+           "\"browseId\":\"FEmusic_home\"}",
+           ver);
   skip = g_skip_visitor;
   rt = g_send_reqtime;
+  skip_user = g_skip_authuser;
+  accept = g_accept;
+  cookie = g_cookie;
+  vis = g_visitor_override;
   g_skip_visitor = 1;
   g_send_reqtime = 1;
-  g_api_format = (kind == 1) ? "2" : NULL;
-  if (kind == 2)
-    n = http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
-                     TV_VER, 1, 1, status, err, err_n);
-  else if (kind == 1)
-    n = http_post_ex(url, body,
-                     "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 11) gzip",
-                     "https://music.youtube.com", "https://music.youtube.com/", "21", "7.27.52", 1,
-                     1, status, err, err_n);
-  else
-    n = http_post_ex(url, body,
-                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
-                     "https://music.youtube.com", "https://music.youtube.com/", NULL, NULL, 1, 1,
-                     status, err, err_n);
-  g_api_format = NULL;
+  g_skip_authuser = 1;
+  g_accept = "*/*";
+  g_cookie = "SOCS=CAI";
+  g_visitor_override = g_music_visitor[0] ? g_music_visitor : NULL;
+  n = http_post_ex(url, body,
+                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0",
+                   "https://music.youtube.com", NULL, NULL, NULL, 1, 1, status, err, err_n);
   g_skip_visitor = skip;
   g_send_reqtime = rt;
+  g_skip_authuser = skip_user;
+  g_accept = accept;
+  g_cookie = cookie;
+  g_visitor_override = vis;
   return n;
 }
 
@@ -1518,27 +1502,22 @@ int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max,
   snprintf(g_place, sizeof g_place, "%s", region);
   if (g_refresh[0] && ensure_access(err, err_n) == 0) authed = 1;
   if (authed) {
-    int kind;
-    for (kind = 0; kind < 3 && *nsongs + *nmixes == 0; kind++) {
-      char cont[3072];
-      int pass;
-      *nsongs = 0;
-      *nmixes = 0;
-      cont[0] = 0;
-      for (pass = 0; pass < 2; pass++) {
-        n = post_account_home(kind, region, pass ? cont : NULL, &status, err, err_n);
-        if (n > 0 && status == 200 && g_resp && g_resp[0]) {
-          split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
-          if (pass == 0 && *nsongs < song_max && *nmixes < mix_max &&
-              take_continuation(g_resp, cont, (int)sizeof cont))
-            continue;
-        } else if (status > 0 && status != 200) {
-          snprintf(saved, sizeof saved, "Home HTTP %d", status);
-        } else if (n < 0 && err[0]) {
-          snprintf(saved, sizeof saved, "%s", err);
-        }
-        break;
+    char cont[1800];
+    int pass;
+    cont[0] = 0;
+    for (pass = 0; pass < 2; pass++) {
+      n = post_account_home(pass ? cont : NULL, &status, err, err_n);
+      if (n > 0 && status == 200 && g_resp && g_resp[0]) {
+        split_home(g_resp, songs, song_max, nsongs, mixes, mix_max, nmixes);
+        if (pass == 0 && (*nsongs < song_max || *nmixes < mix_max) &&
+            take_continuation(g_resp, cont, (int)sizeof cont))
+          continue;
+      } else if (status > 0 && status != 200) {
+        snprintf(saved, sizeof saved, "Home HTTP %d", status);
+      } else if (n < 0 && err[0]) {
+        snprintf(saved, sizeof saved, "%s", err);
       }
+      break;
     }
     if (*nsongs > 0) snprintf(g_song_heading, sizeof g_song_heading, "Quick play");
     if (*nmixes > 0) name_mixes(mixes, *nmixes);
@@ -1730,6 +1709,10 @@ static int http_get_hdr(const char *url, unsigned char *buf, int cap, int *statu
     sceHttp2AddRequestHeader(req, "Accept", "*/*", SCE_HTTP_HEADER_OVERWRITE);
     sceHttp2AddRequestHeader(req, "User-Agent", ua && ua[0] ? ua : "Mozilla/5.0",
                              SCE_HTTP_HEADER_OVERWRITE);
+    if (g_cookie && g_cookie[0]) {
+      sceHttp2AddRequestHeader(req, "Cookie", g_cookie, SCE_HTTP_HEADER_OVERWRITE);
+      sceHttp2AddRequestHeader(req, "Origin", "https://music.youtube.com", SCE_HTTP_HEADER_OVERWRITE);
+    }
     if (ref && ref[0])
       sceHttp2AddRequestHeader(req, "Referer", ref, SCE_HTTP_HEADER_OVERWRITE);
     if (sceHttp2SendRequest(req, "", 0) != 0) {
@@ -1754,6 +1737,33 @@ static int http_get_hdr(const char *url, unsigned char *buf, int cap, int *statu
     return total;
   }
   return -1;
+}
+
+/* ytmusicapi get_visitor_id reads VISITOR_DATA out of the music homepage. */
+static int ensure_music_visitor(void) {
+  int status = 0;
+  int n;
+  const char *p;
+  const char *saved;
+  if (g_music_visitor[0]) return 0;
+  if (!g_resp) return -1;
+  saved = g_cookie;
+  g_cookie = "SOCS=CAI";
+  n = http_get_hdr("https://music.youtube.com/", (unsigned char *)g_resp, RESP_MAX - 1, &status,
+                   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0",
+                   NULL);
+  g_cookie = saved;
+  if (n < 32 || status != 200) return -1;
+  g_resp[n] = 0;
+  p = strstr(g_resp, "\"VISITOR_DATA\":\"");
+  if (!p) return -1;
+  copy_json_str(p + 16, g_music_visitor, (int)sizeof g_music_visitor);
+  if ((int)strlen(g_music_visitor) < 8 || strchr(g_music_visitor, ' ') ||
+      strchr(g_music_visitor, '"') || strchr(g_music_visitor, '\\')) {
+    g_music_visitor[0] = 0;
+    return -1;
+  }
+  return 0;
 }
 
 static int lookup_region(char *cc, int n) {

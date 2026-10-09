@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0
+
+- Signed-in For you uses the same call as ytmusicapi get_home. That is music.youtube.com/youtubei/v1/browse?alt=json, client WEB_REMIX, the account token, and no API key. The next page is ctoken and continuation on that same call.
+- The screen follows Material 3: color roles, the shape scale, navigation pills, cards, a search bar, lists, and the player.
+
 ## 0.5.0
 
 - Signed-in For you is the account home. The request is the music web client with that account's token, then the Android music client, then the TV client. Charts are not mixed in. Charts stay the signed-out home.

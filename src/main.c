@@ -15,6 +15,26 @@
 #define BAR_Y 908
 #define HINT_Y 1016
 
+/* Material 3 dark color roles (red tonal palette) and the shape scale.
+ * https://m3.material.io/styles/color/roles  https://m3.material.io/styles/shape */
+#define M3_PRIMARY 255, 180, 171
+#define M3_ON_PRIMARY 105, 0, 5
+#define M3_PRIMARY_CTN 147, 0, 10
+#define M3_ON_PRIMARY_CTN 255, 218, 214
+#define M3_SECONDARY_CTN 93, 63, 60
+#define M3_ON_SECONDARY_CTN 255, 218, 214
+#define M3_SURFACE 20, 18, 18
+#define M3_SURF_LOWEST 15, 13, 13
+#define M3_SURF_LOW 31, 26, 25
+#define M3_SURF_CTN 36, 30, 29
+#define M3_SURF_HIGH 46, 40, 39
+#define M3_SURF_HIGHEST 57, 51, 50
+#define M3_ON_SURFACE 240, 222, 220
+#define M3_ON_SURFACE_VAR 215, 194, 191
+#define M3_OUTLINE 160, 140, 137
+#define M3_OUTLINE_VAR 83, 67, 65
+#define M3_ERROR 242, 184, 181
+
 enum { NAV_HOME, NAV_SEARCH, NAV_LIBRARY, NAV_ACCOUNT, NAV_QUIT, NAV_COUNT };
 enum { ZONE_NAV, ZONE_BODY };
 enum { BODY_HOME, BODY_LIST, BODY_SEARCH, BODY_LIBRARY, BODY_ACCOUNT, BODY_EXPLORE };
@@ -920,8 +940,8 @@ static int g_art_budget;
 
 static void cover_rgb(const char *s, int *r, int *g, int *b) {
   static const int pal[][3] = {
-      {186, 28, 44},  {28, 92, 168}, {112, 42, 158}, {18, 122, 108},
-      {176, 88, 24},  {58, 58, 158}, {150, 36, 88},  {36, 108, 58},
+      {147, 0, 10},   {93, 63, 60},  {120, 48, 72}, {32, 72, 88},
+      {88, 48, 24},   {56, 48, 96},  {140, 56, 48}, {40, 80, 64},
   };
   unsigned h = 7;
   if (!s) s = "";
@@ -972,11 +992,18 @@ static void draw_repeat_icon(Draw *d, int cx, int cy, int mode, int hr, int hg, 
       {4, 0}, {4, 1}, {4, 2}, {3, 2}, {3, 3}, {2, 3}, {2, 4}, {1, 4}, {0, 4},
   };
   int i;
-  int ink_r = 18, ink_g = 18, ink_b = 22;
+  int ink_r = 255, ink_g = 218, ink_b = 214;
   (void)hr;
   (void)hg;
   (void)hb;
-  draw_disc(d, cx, cy, 22, 244, 242, 236);
+  if (mode == REP_OFF) {
+    ink_r = 215;
+    ink_g = 194;
+    ink_b = 191;
+    draw_disc(d, cx, cy, 22, M3_SURF_HIGHEST);
+  } else {
+    draw_disc(d, cx, cy, 22, M3_PRIMARY_CTN);
+  }
   stroke_seg(d, cx - 10, cy + 1, cx - 10, cy - 5, 1, ink_r, ink_g, ink_b);
   for (i = 0; i < 8; i++)
     stroke_seg(d, cx - 6 + top_arc[i][0], cy - 5 + top_arc[i][1], cx - 6 + top_arc[i + 1][0],
@@ -1004,22 +1031,22 @@ static void draw_volume(Draw *d, int x, int y, int w) {
   int knob;
   if (vol < 0) vol = 0;
   if (vol > 100) vol = 100;
-  fill_round(d, x, y, w, 8, 4, 40, 42, 52);
+  fill_round(d, x, y, w, 8, 4, M3_OUTLINE_VAR);
   fw = (w * vol) / 100;
-  if (fw > 0) fill_round(d, x, y, fw, 8, 4, 212, 166, 86);
+  if (fw > 0) fill_round(d, x, y, fw, 8, 4, M3_PRIMARY);
   knob = x + fw;
   if (knob < x + 10) knob = x + 10;
   if (knob > x + w - 10) knob = x + w - 10;
-  draw_disc(d, knob, y + 4, 11, 244, 242, 236);
+  draw_disc(d, knob, y + 4, 11, M3_PRIMARY);
 }
 
 static void draw_cover(Draw *d, int x, int y, int size, const char *label, int ring) {
   int r, g, b;
   char letter[2];
   int tw;
-  int rad = size > 200 ? 28 : size > 100 ? 20 : 16;
+  int rad = size > 200 ? 28 : 12;
   cover_rgb(label, &r, &g, &b);
-  if (ring) fill_round(d, x - 6, y - 6, size + 12, size + 12, rad + 6, 212, 166, 86);
+  if (ring) fill_round(d, x - 4, y - 4, size + 8, size + 8, rad + 4, M3_PRIMARY);
   fill_round(d, x, y, size, size, rad, r, g, b);
   letter[0] = (label && label[0]) ? (char)toupper((unsigned char)label[0]) : 'M';
   letter[1] = 0;
@@ -1053,14 +1080,14 @@ static void draw_menu(Draw *d) {
   h = 96 + g_menu_n * row;
   y = (980 - h) / 2;
   if (y < 36) y = 36;
-  fill_round(d, x - 8, y - 8, w + 16, h + 16, 28, 212, 166, 86);
-  fill_round(d, x, y, w, h, 24, 16, 17, 22);
+  fill_round(d, x, y, w, h, 8, M3_SURF_HIGH);
   fit(line, (int)sizeof line, t && t->title[0] ? t->title : "Options", 1, w - 64);
-  draw_text(d, x + 32, y + 22, 1, 212, 166, 86, line);
+  draw_text(d, x + 32, y + 22, 1, M3_ON_SURFACE_VAR, line);
   for (i = 0; i < g_menu_n; i++) {
     int yy = y + 72 + i * row;
-    if (i == g_menu_sel) fill_round(d, x + 16, yy - 8, w - 32, row - 8, 16, 42, 36, 28);
-    draw_text(d, x + 40, yy + 8, 1, 244, 242, 236, g_menu_label[i]);
+    if (i == g_menu_sel) fill_round(d, x + 12, yy - 6, w - 24, row - 10, 8, M3_SECONDARY_CTN);
+    draw_text(d, x + 40, yy + 8, 1, i == g_menu_sel ? 255 : 240, i == g_menu_sel ? 218 : 222,
+              i == g_menu_sel ? 214 : 220, g_menu_label[i]);
   }
 }
 
@@ -1076,8 +1103,8 @@ static void present(Draw *d) {
 
 static void draw_hints(Draw *d) {
   const char *s;
-  fill_v(d, 0, HINT_Y, 1920, 1080 - HINT_Y, 10, 11, 14);
-  fill_v(d, 0, HINT_Y, 1920, 2, 212, 166, 86);
+  fill_v(d, 0, HINT_Y, 1920, 1080 - HINT_Y, M3_SURF_LOWEST);
+  fill_v(d, 0, HINT_Y, 1920, 1, M3_OUTLINE_VAR);
   if (g_menu) {
     s = "X Choose   O Close   D-pad Move   Square Close";
   } else if (g_player_ui) {
@@ -1099,7 +1126,7 @@ static void draw_hints(Draw *d) {
   } else {
     s = "X Play   Square Menu   O Back   D-pad Move   Triangle Player   Options Search";
   }
-  draw_text(d, 28, HINT_Y + 16, 1, 214, 216, 224, s);
+  draw_text(d, 28, HINT_Y + 16, 1, M3_ON_SURFACE_VAR, s);
 }
 
 /* first_row is the first visible row of a 2-column grid. Returns y after the last row. */
@@ -1114,12 +1141,12 @@ static int draw_two_col(Draw *d, char *line, int line_n, const Track *items, int
       int x = c ? x1 : x0;
       int yy = y + r * 74;
       if (idx >= n) continue;
-      if (selected && sel_idx == idx) fill_round(d, x - 8, yy - 4, colw, 68, 16, 32, 34, 44);
+      if (selected && sel_idx == idx) fill_round(d, x - 8, yy - 4, colw, 68, 12, M3_SECONDARY_CTN);
       draw_track_art(d, x, yy, 56, &items[idx]);
       fit(line, line_n, items[idx].title, 1, 640);
-      draw_text(d, x + 68, yy + 2, 1, 244, 242, 236, line);
+      draw_text(d, x + 68, yy + 2, 1, M3_ON_SURFACE, line);
       fit(line, line_n, items[idx].artist, 1, 400);
-      draw_text(d, x + 68, yy + 30, 1, 150, 152, 164, line);
+      draw_text(d, x + 68, yy + 30, 1, M3_ON_SURFACE_VAR, line);
     }
   }
   return y + rows * 74;
@@ -1148,7 +1175,7 @@ static void paint(void) {
     g_art_budget--;
   }
   draw_begin(&d, surf);
-  fill_v(&d, 0, 0, 1920, 1080, 12, 13, 16);
+  fill_v(&d, 0, 0, 1920, 1080, M3_SURFACE);
 
   if (g_player_ui && now) {
     char a[16], b[16];
@@ -1157,69 +1184,70 @@ static void paint(void) {
     int w = 0;
     int qvis = 8;
     int qscroll = 0;
+    int chip;
     if (dur < 1) dur = now->seconds;
     if (g_qpick >= qvis) qscroll = g_qpick - qvis + 1;
-    fill_v(&d, 0, 0, 1920, 1080, 8, 9, 12);
-    fill_round(&d, 28, 24, 1864, HINT_Y - 48, 36, 212, 166, 86);
-    fill_round(&d, 36, 32, 1848, HINT_Y - 64, 32, 8, 9, 12);
-    fill_round(&d, 56, 48, text_px("Now Playing", 1) + 40, 44, 22, 212, 166, 86);
-    draw_text(&d, 76, 54, 1, 24, 18, 8, "Now Playing");
-    draw_track_art(&d, 72, 120, 280, now);
+    fill_v(&d, 0, 0, 1920, 1080, M3_SURFACE);
+    fill_round(&d, 24, 20, 1872, HINT_Y - 40, 28, M3_SURF_CTN);
+    chip = text_px("Now playing", 1) + 32;
+    fill_round(&d, 56, 44, chip, 36, 18, M3_PRIMARY_CTN);
+    draw_text(&d, 72, 50, 1, M3_ON_PRIMARY_CTN, "Now playing");
+    draw_track_art(&d, 72, 112, 280, now);
     fit(line, (int)sizeof line, now->title, 2, 860);
-    draw_text(&d, 72, 420, 2, 244, 242, 236, line);
+    draw_text(&d, 72, 412, 2, M3_ON_SURFACE, line);
     fit(line, (int)sizeof line, now->artist, 1, 860);
-    draw_text(&d, 72, 490, 1, 168, 170, 180, line);
+    draw_text(&d, 72, 482, 1, M3_ON_SURFACE_VAR, line);
     if (now->album[0]) {
       fit(line, (int)sizeof line, now->album, 1, 860);
-      draw_text(&d, 72, 530, 1, 150, 152, 164, line);
+      draw_text(&d, 72, 522, 1, M3_OUTLINE, line);
     }
-    fill_round(&d, 72, 600, 860, 8, 4, 40, 42, 52);
+    fill_round(&d, 72, 592, 860, 8, 4, M3_OUTLINE_VAR);
     if (dur > 0) {
       w = (int)(860.0 * (pos / (double)dur));
       if (w < 0) w = 0;
       if (w > 860) w = 860;
-      if (w > 0) fill_round(&d, 72, 600, w, 8, 4, 212, 166, 86);
+      if (w > 0) fill_round(&d, 72, 592, w, 8, 4, M3_PRIMARY);
     }
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);
-    draw_text(&d, 72, 618, 1, 168, 170, 180, a);
-    draw_text(&d, 932 - text_px(b, 1), 618, 1, 168, 170, 180, b);
-    draw_text(&d, 72, 680, 1, 150, 152, 164, "Volume");
-    draw_volume(&d, 220, 692, 480);
-    draw_repeat_icon(&d, 800, 696, g_repeat, 8, 9, 12);
+    draw_text(&d, 72, 610, 1, M3_ON_SURFACE_VAR, a);
+    draw_text(&d, 932 - text_px(b, 1), 610, 1, M3_ON_SURFACE_VAR, b);
+    draw_text(&d, 72, 672, 1, M3_ON_SURFACE_VAR, "Volume");
+    draw_volume(&d, 220, 684, 480);
+    draw_repeat_icon(&d, 800, 688, g_repeat, M3_SURF_CTN);
     if (g_status[0]) {
       fit(line, (int)sizeof line, g_status, 1, 860);
-      draw_text(&d, 72, 760, 1, 232, 120, 96, line);
+      draw_text(&d, 72, 752, 1, M3_ERROR, line);
     } else if (player_error()[0]) {
       fit(line, (int)sizeof line, player_error(), 1, 860);
-      draw_text(&d, 72, 760, 1, 232, 120, 96, line);
+      draw_text(&d, 72, 752, 1, M3_ERROR, line);
     } else if (player_paused()) {
-      draw_text(&d, 72, 760, 1, 196, 198, 206, "Paused");
+      draw_text(&d, 72, 752, 1, M3_ON_SURFACE_VAR, "Paused");
     }
-    fill_round(&d, 980, 110, 860, 760, 28, 22, 24, 32);
-    draw_text(&d, 1004, 128, 1, 244, 242, 236, "Up next");
+    fill_round(&d, 980, 100, 860, 770, 16, M3_SURF_HIGH);
+    draw_text(&d, 1004, 120, 1, M3_ON_SURFACE, "Up next");
     for (int i = 0; i < qvis && qscroll + i < g_nqueue; i++) {
       int idx = qscroll + i;
-      int y = 180 + i * 82;
+      int y = 172 + i * 82;
       int on = idx == g_qpick;
-      if (on) fill_round(&d, 996, y - 6, 828, 76, 18, 42, 36, 28);
-      if (idx == g_qindex) fill_v(&d, 996, y, 6, 64, 212, 166, 86);
+      if (on) fill_round(&d, 996, y - 6, 828, 76, 12, M3_SECONDARY_CTN);
+      if (idx == g_qindex) fill_v(&d, 996, y, 4, 64, M3_PRIMARY);
       draw_track_art(&d, 1016, y, 64, &g_queue[idx]);
       fit(line, (int)sizeof line, g_queue[idx].title, 1, 680);
-      draw_text(&d, 1096, y + 4, 1, 244, 242, 236, line);
+      draw_text(&d, 1096, y + 4, 1, M3_ON_SURFACE, line);
       fit(line, (int)sizeof line, g_queue[idx].artist, 1, 480);
-      draw_text(&d, 1096, y + 36, 1, 150, 152, 164, line);
+      draw_text(&d, 1096, y + 36, 1, M3_ON_SURFACE_VAR, line);
     }
     draw_hints(&d);
     present(&d);
     return;
   }
 
-  fill_v(&d, 0, 0, RAIL, BAR_Y, 18, 19, 24);
-  fill_v(&d, RAIL - 2, 0, 2, BAR_Y, 36, 38, 48);
-  draw_disc(&d, 40, 52, 12, 212, 166, 86);
-  draw_text(&d, 64, 22, 1, 244, 242, 236, "YouTube");
-  draw_text(&d, 64, 54, 1, 168, 170, 180, "Music");
+  fill_v(&d, 0, 0, RAIL, BAR_Y, M3_SURF_LOW);
+  fill_v(&d, RAIL - 1, 0, 1, BAR_Y, M3_OUTLINE_VAR);
+  draw_disc(&d, 40, 52, 12, M3_PRIMARY);
+  draw_text(&d, 64, 22, 1, M3_ON_SURFACE, "YouTube");
+  draw_text(&d, 64, 54, 1, M3_ON_SURFACE_VAR, "Music");
   {
     const char *mode = "Choosing a section";
     if (g_zone != ZONE_NAV) {
@@ -1230,23 +1258,34 @@ static void paint(void) {
       else if (g_body == BODY_ACCOUNT) mode = ytm_signed_in() ? "Signed in" : "Signing in";
       else mode = "Song list";
     }
-    draw_text(&d, 28, 104, 1, 212, 166, 86, mode);
+    draw_text(&d, 28, 104, 1, M3_PRIMARY, mode);
   }
 
   for (int i = 0; i < NAV_QUIT; i++) {
     int y = 156 + i * 68;
     int on = (g_nav == i);
+    int nr = 215, ng = 194, nb = 191;
     if (on) {
-      fill_round(&d, 16, y - 8, RAIL - 32, 48, 24, g_zone == ZONE_NAV ? 54 : 32,
-                 g_zone == ZONE_NAV ? 44 : 34, g_zone == ZONE_NAV ? 28 : 44);
+      int focus = (g_zone == ZONE_NAV);
+      fill_round(&d, 12, y - 8, RAIL - 24, 48, 24, focus ? 147 : 93, focus ? 0 : 63, focus ? 10 : 60);
+      nr = 255;
+      ng = 218;
+      nb = 214;
     }
-    draw_text(&d, 36, y, 1, on ? 244 : 150, on ? 242 : 152, on ? 236 : 164, nav_name[i]);
+    draw_text(&d, 36, y, 1, nr, ng, nb, nav_name[i]);
   }
   {
     int on = (g_nav == NAV_QUIT);
-    if (on) fill_round(&d, 16, BAR_Y - 78, RAIL - 32, 52, 24, g_zone == ZONE_NAV ? 54 : 32,
-                       g_zone == ZONE_NAV ? 44 : 34, g_zone == ZONE_NAV ? 28 : 44);
-    draw_text(&d, 36, BAR_Y - 70, 1, on ? 244 : 120, on ? 242 : 122, on ? 236 : 132, "Quit");
+    int nr = 160, ng = 140, nb = 137;
+    if (on) {
+      int focus = (g_zone == ZONE_NAV);
+      fill_round(&d, 12, BAR_Y - 80, RAIL - 24, 48, 24, focus ? 147 : 93, focus ? 0 : 63,
+                 focus ? 10 : 60);
+      nr = 255;
+      ng = 218;
+      nb = 214;
+    }
+    draw_text(&d, 36, BAR_Y - 68, 1, nr, ng, nb, "Quit");
   }
 
   if (g_body == BODY_HOME) {
@@ -1257,17 +1296,17 @@ static void paint(void) {
       const char *place = ytm_home_place();
       if (!ytm_signed_in() && place && place[0]) {
         snprintf(line, sizeof line, "Charts · %s", place);
-        draw_text(&d, x0, 24, 1, 244, 242, 236, line);
+        draw_text(&d, x0, 16, 2, M3_ON_SURFACE, line);
       } else {
-        draw_text(&d, x0, 24, 1, 244, 242, 236, "For you");
+        draw_text(&d, x0, 16, 2, M3_ON_SURFACE, "For you");
       }
       if (g_status[0]) {
         fit(line, (int)sizeof line, g_status, 1, 500);
-        draw_text(&d, 1920 - 40 - text_px(line, 1), 28, 1, 168, 170, 180, line);
+        draw_text(&d, 1920 - 40 - text_px(line, 1), 28, 1, M3_ERROR, line);
       }
-      draw_text(&d, x0, 68, 1, 212, 166, 86, ytm_home_song_heading());
+      draw_text(&d, x0, 72, 1, M3_PRIMARY, ytm_home_song_heading());
       if (g_nquick < 1) {
-        draw_text(&d, x0, y, 1, 140, 142, 154, "No songs yet");
+        draw_text(&d, x0, y, 1, M3_ON_SURFACE_VAR, "No songs yet");
         y += 40;
       } else {
         int cap = g_nmixes > 0 ? 5 : (888 - y) / 74;
@@ -1280,10 +1319,10 @@ static void paint(void) {
                          x0, y, cap);
       }
       y += 8;
-      draw_text(&d, x0, y, 1, 212, 166, 86, ytm_home_mix_heading());
+      draw_text(&d, x0, y, 1, M3_PRIMARY, ytm_home_mix_heading());
       y += 36;
       if (g_nmixes < 1) {
-        draw_text(&d, x0, y, 1, 140, 142, 154, "No playlists yet");
+        draw_text(&d, x0, y, 1, M3_ON_SURFACE_VAR, "No playlists yet");
       } else {
         int cap = (888 - y) / 74;
         int total = (g_nmixes + 1) / 2;
@@ -1295,10 +1334,10 @@ static void paint(void) {
                      x0, y, cap);
       }
     } else {
-    draw_text(&d, RAIL + 28, 24, 1, 244, 242, 236, "Shelves");
+    draw_text(&d, RAIL + 28, 16, 2, M3_ON_SURFACE, "Shelves");
     if (g_status[0]) {
       fit(line, (int)sizeof line, g_status, 1, 1400);
-      draw_text(&d, RAIL + 28, 68, 1, 232, 160, 110, line);
+      draw_text(&d, RAIL + 28, 72, 1, M3_ERROR, line);
     }
     for (int i = 0; i < 8; i++) {
       int col = i % 4;
@@ -1308,82 +1347,84 @@ static void paint(void) {
       int sel = (g_zone == ZONE_BODY && g_home == i);
       int cr, cg, cb;
       cover_rgb(moods[i][0], &cr, &cg, &cb);
-      if (sel) fill_round(&d, x - 4, y - 4, 368, 208, 28, 212, 166, 86);
-      fill_round(&d, x, y, 360, 200, 24, 24, 26, 34);
+      if (sel) fill_round(&d, x - 3, y - 3, 366, 206, 16, M3_PRIMARY);
+      fill_round(&d, x, y, 360, 200, 12, M3_SURF_HIGH);
       fill_round(&d, x + 24, y + 36, 72, 8, 4, cr, cg, cb);
-      draw_text(&d, x + 24, y + 64, 2, 244, 242, 236, moods[i][0]);
+      draw_text(&d, x + 24, y + 64, 2, M3_ON_SURFACE, moods[i][0]);
     }
     }
   } else if (g_body == BODY_EXPLORE) {
-    draw_text(&d, RAIL + 28, 24, 2, 244, 242, 236, "Explore");
-    draw_text(&d, RAIL + 28, 96, 1, 150, 152, 164, "New music, charts, and what is playing now");
+    draw_text(&d, RAIL + 28, 16, 2, M3_ON_SURFACE, "Explore");
+    draw_text(&d, RAIL + 28, 80, 1, M3_ON_SURFACE_VAR, "New music, charts, and what is playing now");
     for (int i = 0; i < 3; i++) {
-      int y = 160 + i * 220;
+      int y = 150 + i * 220;
       int sel = (g_zone == ZONE_BODY && g_explore == i);
       int cr, cg, cb;
       cover_rgb(explore_shelf[i][0], &cr, &cg, &cb);
-      if (sel) fill_round(&d, RAIL + 20, y - 4, 1548, 200, 28, 212, 166, 86);
-      fill_round(&d, RAIL + 28, y, 1532, 188, 24, 24, 26, 34);
+      if (sel) fill_round(&d, RAIL + 24, y - 3, 1540, 194, 16, M3_PRIMARY);
+      fill_round(&d, RAIL + 28, y, 1532, 188, 12, M3_SURF_HIGH);
       fill_v(&d, RAIL + 28, y + 28, 8, 132, cr, cg, cb);
-      draw_text(&d, RAIL + 64, y + 48, 2, 244, 242, 236, explore_shelf[i][0]);
-      draw_text(&d, RAIL + 64, y + 118, 1, 150, 152, 164, explore_shelf[i][1]);
+      draw_text(&d, RAIL + 64, y + 48, 2, M3_ON_SURFACE, explore_shelf[i][0]);
+      draw_text(&d, RAIL + 64, y + 118, 1, M3_ON_SURFACE_VAR, explore_shelf[i][1]);
     }
     if (g_status[0]) {
       fit(line, (int)sizeof line, g_status, 1, 1400);
-      draw_text(&d, RAIL + 28, 830, 1, 232, 160, 110, line);
+      draw_text(&d, RAIL + 28, 830, 1, M3_ERROR, line);
     }
   } else if (g_body == BODY_SEARCH) {
-    fill_round(&d, RAIL + 28, 24, 1560, 64, 32, 28, 30, 38);
+    fill_round(&d, RAIL + 28, 20, 1560, 56, 28, M3_SURF_HIGH);
     fit(line, (int)sizeof line, g_query[0] ? g_query : "Search songs, albums, artists", 1, 1500);
-    draw_text(&d, RAIL + 48, 38, 1, g_query[0] ? 244 : 140, g_query[0] ? 242 : 142, g_query[0] ? 236 : 154, line);
+    draw_text(&d, RAIL + 52, 34, 1, g_query[0] ? 240 : 160, g_query[0] ? 222 : 140, g_query[0] ? 220 : 137,
+              line);
     for (int r = 0; r < 5; r++) {
       int cols = key_cols(r);
       int indent = r == 2 ? 48 : r == 3 ? 96 : 0;
       for (int c = 0; c < cols; c++) {
         int x = RAIL + 28 + indent + c * (r == 4 ? 280 : 118);
-        int y = 120 + r * 100;
+        int y = 112 + r * 100;
         int sel = (g_zone == ZONE_BODY && g_keyr == r && g_keyc == c);
         char lab[8];
         int kw = r == 4 ? 250 : 104;
-        fill_round(&d, x, y, kw, 84, 20, sel ? 244 : 32, sel ? 242 : 34, sel ? 236 : 44);
+        fill_round(&d, x, y, kw, 80, sel ? 40 : 8, sel ? 147 : 57, sel ? 0 : 51, sel ? 10 : 50);
         if (r < 4) {
           lab[0] = krow[r][c];
           lab[1] = 0;
-          draw_text(&d, x + (kw - text_px(lab, 1)) / 2, y + 24, 1, sel ? 16 : 244, sel ? 16 : 242,
-                    sel ? 18 : 236, lab);
+          draw_text(&d, x + (kw - text_px(lab, 1)) / 2, y + 22, 1, sel ? 255 : 240, sel ? 218 : 222,
+                    sel ? 214 : 220, lab);
         } else {
-          draw_text(&d, x + 28, y + 24, 1, sel ? 16 : 244, sel ? 16 : 242, sel ? 18 : 236, specials[c]);
+          draw_text(&d, x + 28, y + 22, 1, sel ? 255 : 240, sel ? 218 : 222, sel ? 214 : 220,
+                    specials[c]);
         }
       }
     }
     if (g_status[0]) {
       fit(line, (int)sizeof line, g_status, 1, 1400);
-      draw_text(&d, RAIL + 28, 640, 1, 232, 120, 96, line);
+      draw_text(&d, RAIL + 28, 640, 1, M3_ERROR, line);
     }
   } else if (g_body == BODY_ACCOUNT) {
     const char *shown = g_verify_url;
-    draw_text(&d, RAIL + 28, 28, 2, 244, 242, 236, ytm_signed_in() ? "Account" : "Sign in");
+    draw_text(&d, RAIL + 28, 16, 2, M3_ON_SURFACE, ytm_signed_in() ? "Account" : "Sign in");
     if (!ytm_signed_in()) {
       if (strncmp(shown, "https://", 8) == 0) shown += 8;
       else if (strncmp(shown, "http://", 7) == 0) shown += 7;
-      draw_text(&d, RAIL + 28, 120, 1, 168, 170, 180, "On a phone or computer, open");
-      draw_text(&d, RAIL + 28, 164, 1, 212, 166, 86, shown[0] ? shown : "google.com/device");
-      draw_text(&d, RAIL + 28, 220, 1, 168, 170, 180, "and enter this code");
-      fill_round(&d, RAIL + 28, 268, 560, 84, 24, 28, 30, 38);
-      draw_text(&d, RAIL + 52, 292, 2, 244, 242, 236, g_user_code[0] ? g_user_code : "...");
+      draw_text(&d, RAIL + 28, 100, 1, M3_ON_SURFACE_VAR, "On a phone or computer, open");
+      draw_text(&d, RAIL + 28, 144, 1, M3_PRIMARY, shown[0] ? shown : "google.com/device");
+      draw_text(&d, RAIL + 28, 200, 1, M3_ON_SURFACE_VAR, "and enter this code");
+      fill_round(&d, RAIL + 28, 252, 560, 88, 12, M3_SURF_HIGH);
+      draw_text(&d, RAIL + 52, 276, 2, M3_ON_SURFACE, g_user_code[0] ? g_user_code : "...");
       if (g_status[0]) {
         fit(line, (int)sizeof line, g_status, 1, 1400);
-        draw_text(&d, RAIL + 28, 380, 1, 232, 160, 110, line);
+        draw_text(&d, RAIL + 28, 368, 1, M3_ERROR, line);
       }
-      draw_text(&d, RAIL + 28, 450, 1, 150, 152, 164, "X asks for a new code if this one expires");
+      draw_text(&d, RAIL + 28, 440, 1, M3_ON_SURFACE_VAR, "X asks for a new code if this one expires");
     } else {
       const char *rows[] = {"Sign out"};
-      draw_text(&d, RAIL + 28, 120, 1, 168, 170, 180, "YouTube Music is linked to this console");
+      draw_text(&d, RAIL + 28, 108, 1, M3_ON_SURFACE_VAR, "YouTube Music is linked to this console");
       {
-        int y = 200;
+        int y = 180;
         int sel = (g_zone == ZONE_BODY);
-        if (sel) fill_round(&d, RAIL + 16, y, 900, 80, 24, 42, 36, 28);
-        draw_text(&d, RAIL + 40, y + 22, 1, 244, 242, 236, rows[0]);
+        fill_round(&d, RAIL + 28, y, 280, 56, 28, sel ? 147 : 57, sel ? 0 : 51, sel ? 10 : 50);
+        draw_text(&d, RAIL + 52, y + 14, 1, sel ? 255 : 240, sel ? 218 : 222, sel ? 214 : 220, rows[0]);
       }
     }
   } else {
@@ -1393,7 +1434,7 @@ static void paint(void) {
                           : (g_list_title[0] ? g_list_title : "Songs");
     const int vis = 6;
     fit(line, (int)sizeof line, heading, 2, 1200);
-    draw_text(&d, RAIL + 28, 28, 2, 244, 242, 236, line);
+    draw_text(&d, RAIL + 28, 16, 2, M3_ON_SURFACE, line);
     if (n == 0) {
       const char *empty = "No songs for that search.";
       if (g_status[0]) empty = g_status;
@@ -1401,27 +1442,27 @@ static void paint(void) {
         empty = ytm_signed_in() ? "No liked songs on this account."
                                 : "Sign in from Account to load your library.";
       fit(line, (int)sizeof line, empty, 1, 1400);
-      draw_text(&d, RAIL + 28, 160, 1, 168, 170, 180, line);
+      draw_text(&d, RAIL + 28, 120, 1, M3_ON_SURFACE_VAR, line);
     }
     for (int i = 0; i < vis && g_scroll + i < n; i++) {
       int idx = g_scroll + i;
-      int y = 130 + i * 120;
+      int y = 112 + i * 120;
       int sel = (g_zone == ZONE_BODY && g_sel == idx);
       char time[16];
-      if (sel) fill_round(&d, RAIL + 16, y - 8, 1588, 108, 24, 32, 34, 44);
+      if (sel) fill_round(&d, RAIL + 16, y - 8, 1588, 108, 12, M3_SECONDARY_CTN);
       draw_track_art(&d, RAIL + 36, y, 84, &list[idx]);
       fit(line, (int)sizeof line, list[idx].title, 1, 1100);
-      draw_text(&d, RAIL + 140, y + 8, 1, 244, 242, 236, line);
+      draw_text(&d, RAIL + 140, y + 8, 1, M3_ON_SURFACE, line);
       fit(line, (int)sizeof line, list[idx].artist, 1, 900);
-      draw_text(&d, RAIL + 140, y + 46, 1, 150, 152, 164, line);
+      draw_text(&d, RAIL + 140, y + 46, 1, M3_ON_SURFACE_VAR, line);
       if (list[idx].seconds > 0) {
         fmt_time(time, (int)sizeof time, list[idx].seconds);
-        draw_text(&d, RAIL + 1420, y + 24, 1, 150, 152, 164, time);
+        draw_text(&d, RAIL + 1420, y + 24, 1, M3_ON_SURFACE_VAR, time);
       }
     }
   }
 
-  fill_round(&d, 16, BAR_Y + 8, 1888, HINT_Y - BAR_Y - 16, 28, 28, 30, 38);
+  fill_round(&d, 16, BAR_Y + 8, 1888, HINT_Y - BAR_Y - 16, 16, M3_SURF_HIGH);
   if (now) {
     char a[16], b[16];
     const char *sub = now->album[0] ? now->album : now->artist;
@@ -1432,29 +1473,29 @@ static void paint(void) {
     if (dur < 1) dur = now->seconds;
     draw_track_art(&d, 36, BAR_Y + 18, 72, now);
     fit(line, (int)sizeof line, now->title, 1, 400);
-    draw_text(&d, 124, BAR_Y + 20, 1, 244, 242, 236, line);
+    draw_text(&d, 124, BAR_Y + 20, 1, M3_ON_SURFACE, line);
     fit(line, (int)sizeof line, sub, 1, 400);
-    draw_text(&d, 124, BAR_Y + 54, 1, 150, 152, 164, line);
+    draw_text(&d, 124, BAR_Y + 54, 1, M3_ON_SURFACE_VAR, line);
     fmt_time(a, (int)sizeof a, pos);
     fmt_time(b, (int)sizeof b, dur);
-    draw_text(&d, bar_x - 16 - text_px(a, 1), BAR_Y + 38, 1, 168, 170, 180, a);
-    fill_round(&d, bar_x, BAR_Y + 50, bar_w, 8, 4, 48, 50, 60);
+    draw_text(&d, bar_x - 16 - text_px(a, 1), BAR_Y + 38, 1, M3_ON_SURFACE_VAR, a);
+    fill_round(&d, bar_x, BAR_Y + 50, bar_w, 8, 4, M3_OUTLINE_VAR);
     if (dur > 0) {
       int bw = (int)((double)bar_w * (pos / (double)dur));
       if (bw < 0) bw = 0;
       if (bw > bar_w) bw = bar_w;
-      if (bw > 0) fill_round(&d, bar_x, BAR_Y + 50, bw, 8, 4, 212, 166, 86);
+      if (bw > 0) fill_round(&d, bar_x, BAR_Y + 50, bw, 8, 4, M3_PRIMARY);
     }
-    draw_text(&d, bar_x + bar_w + 16, BAR_Y + 38, 1, 168, 170, 180, b);
+    draw_text(&d, bar_x + bar_w + 16, BAR_Y + 38, 1, M3_ON_SURFACE_VAR, b);
     if (g_nqueue > 1) {
       char qn[24];
       snprintf(qn, sizeof qn, "%d up next", g_nqueue - (g_qindex + 1));
       if (g_qindex + 1 >= g_nqueue) snprintf(qn, sizeof qn, "End of queue");
-      draw_text(&d, 1560, BAR_Y + 22, 1, 150, 152, 164, qn);
+      draw_text(&d, 1560, BAR_Y + 22, 1, M3_ON_SURFACE_VAR, qn);
     }
-    draw_repeat_icon(&d, 1816, BAR_Y + 54, g_repeat, 28, 30, 38);
+    draw_repeat_icon(&d, 1816, BAR_Y + 54, g_repeat, M3_SURF_HIGH);
   } else {
-    draw_text(&d, 36, BAR_Y + 36, 1, 150, 152, 164, "Nothing playing");
+    draw_text(&d, 36, BAR_Y + 36, 1, M3_ON_SURFACE_VAR, "Nothing playing");
   }
   draw_hints(&d);
   present(&d);
