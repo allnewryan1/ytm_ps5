@@ -5,7 +5,10 @@
 #define YTM_ID_LEN 12
 #define YTM_TITLE_LEN 180
 #define YTM_BROWSE_LEN 72
-#define YTM_THUMB_LEN 200
+#define YTM_THUMB_LEN 320
+
+/* What YouTube Music says the item is (musicVideoType). */
+enum { YTM_KIND_UNKNOWN = 0, YTM_KIND_SONG, YTM_KIND_VIDEO, YTM_KIND_EPISODE };
 
 typedef struct Track {
   char id[YTM_ID_LEN];
@@ -17,7 +20,7 @@ typedef struct Track {
   char album[YTM_TITLE_LEN];
   char thumb[YTM_THUMB_LEN];
   int seconds;
-  int video; /* 1 when YouTube marks the row as a video, not an audio track */
+  int kind;
 } Track;
 
 #endif

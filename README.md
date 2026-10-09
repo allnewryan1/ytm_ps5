@@ -60,9 +60,30 @@ The install folder stays `PPSA99105`. The home screen title is YouTube Music. `e
 | Left / right on the player | Seek 10 seconds |
 | Up / down on the player | Move through the queue |
 
-Cross on a song plays that song. If it is not already in the queue, YouTube's radio mix for that song replaces the queue, with the song first. Signed in, that mix is requested with the account. Add to queue still adds only that song. Play next inserts it after the current one. Opening an album or a playlist with Cross still replaces the queue with that list.
+Cross on a song plays that song. If it is already in the queue, playback jumps to it. Otherwise the queue becomes that song followed by the automix YouTube Music builds from it, the same list ytmusicapi `get_watch_playlist` returns. Signed in with your own OAuth client (below), that mix also follows your account's taste. When the mix runs out with repeat off, it continues from the last song. Square is where Play next and Add to queue live; those add only the one song and never replace the queue. Opening an album or a playlist with Cross still replaces the queue with that list.
+
+Rows marked **Video** are music videos (YouTube Music `MUSIC_VIDEO_TYPE_OMV`, `UGC`, or `OFFICIAL_SOURCE_MUSIC`). Unmarked rows are songs (`ATV`). Podcast episodes are marked **Episode**.
 
 A USB keyboard works too: arrows, Enter, Esc, and Backspace.
+
+## Your own Home recommendations
+
+Since November 2024, YouTube Music answers HTTP 400 to a token from the YouTube TV sign-in that the console uses by default. ytmusicapi has the same rule: its OAuth needs your own Google Cloud OAuth client. Without one, signing in still loads Library, and Home shows public picks for your country.
+
+To get your own Home:
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **YouTube Data API v3**.
+2. Under **APIs & Services → Credentials**, create an **OAuth client ID** of type **TVs and Limited Input devices**. If the consent screen is in testing, add your Google account as a test user.
+3. Put the client ID and secret on the console in `/data/ytmusic/oauth_client.txt`, one per line:
+
+   ```
+   client_id=1234567890-abc.apps.googleusercontent.com
+   client_secret=GOCSPX-...
+   ```
+
+4. Restart the app. In **Account**, sign out and sign in again with the new code.
+
+The Account page says which sign-in is in use. `/data/ytmusic/auth.txt` keeps the refresh token and which client it came from.
 
 ## If a song will not play
 
@@ -70,4 +91,4 @@ YouTube sometimes returns a signed stream instead of a direct audio URL, or it r
 
 ## Notices
 
-Home and charts requests follow the browse identifiers used by [ytmusicapi](https://github.com/sigma67/ytmusicapi) (`FEmusic_home` and `FEmusic_charts`). That project is MIT licensed. The notice is in [NOTICE](NOTICE). This program does not include the Python library.
+Home, charts, liked songs, and the automix follow the requests used by [ytmusicapi](https://github.com/sigma67/ytmusicapi) (`get_home`, `get_charts`, `get_liked_songs`, and `get_watch_playlist`), including its OAuth client flow. That project is MIT licensed. The notice is in [NOTICE](NOTICE). This program does not include the Python library.

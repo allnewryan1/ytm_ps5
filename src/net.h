@@ -29,8 +29,14 @@ int ytm_signed_in(void);
 const char *ytm_refresh_token(void);
 void ytm_set_refresh_token(const char *token);
 
-/* Song radio (RDAMVM + the video id). 0-length means YouTube returned no mix. */
-int ytm_radio(const char *video_id, Track *out, int max, char *err, int err_n);
+/* Optional Google Cloud OAuth client ("TVs and Limited Input devices"), the setup ytmusicapi
+ * requires. With it, sign-in mints a token the music web client accepts, so Home is the
+ * account's own recommendations. Without it, the YouTube TV client signs in and Home is public. */
+void ytm_set_oauth_client(const char *id, const char *secret);
+int ytm_oauth_client_set(void);
+/* 1 when the saved refresh token came from that client. Saved next to the token. */
+int ytm_token_custom(void);
+void ytm_set_token_custom(int on);
 
 /* Liked songs for the signed-in account. */
 int ytm_liked(Track *out, int max, char *err, int err_n);
@@ -43,6 +49,12 @@ int ytm_home(Track *songs, int song_max, int *nsongs, Track *mixes, int mix_max,
 const char *ytm_home_song_heading(void);
 const char *ytm_home_mix_heading(void);
 const char *ytm_home_place(void);
+/* Why Home is not the account's own feed, or "" when it is. */
+const char *ytm_home_note(void);
+
+/* Automix that follows a song: ytmusicapi get_watch_playlist(videoId), playlist RDAMVM<id>.
+ * Signed in with the OAuth client, it is personalized. The song itself is usually item 0. */
+int ytm_radio(const char *video_id, Track *out, int max, char *err, int err_n);
 
 /* Rewrite url to the host that serves the audio. Headers only; the file is not read. */
 int ytm_stream_follow(char *url, int url_n);

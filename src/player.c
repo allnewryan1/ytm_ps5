@@ -31,83 +31,94 @@ static char g_ua[200];
 static char g_ref[120];
 static char g_err[192];
 static int g_duration_hint;
-static atomic_uint_least64_t g_samples;
-static atomic_int g_ended;
+static atomic_int g_eof;    /* decoder finished: all samples are in the ring */
 static atomic_int g_volume; /* 0..100 */
+static Uint32 g_drained_at;
+
+/* Decoded PCM waits here for the audio callback. Volume is applied in the callback, on the
+ * last ~20 ms before the speaker, so a change is heard at once instead of after everything
+ * already queued. Frames are stereo S16 at 48 kHz. */
+#define OUT_RATE 48000
+#define RING_FRAMES (OUT_RATE * 2)
+#define AHEAD_FRAMES (OUT_RATE * 3 / 2)
+static int16_t g_ring[RING_FRAMES * 2];
+static atomic_uint_least64_t g_wr;     /* frames written by the decoder */
+static atomic_uint_least64_t g_rd;     /* frames consumed by the callback */
+static atomic_uint_least64_t g_played; /* stream position in frames */
+static float g_gain_now = 0.8f;        /* callback thread only */
+
+static void audio_cb(void *ud, Uint8 *stream, int len) {
+  int16_t *out = (int16_t *)stream;
+  int want = len / 4;
+  uint64_t rd = atomic_load(&g_rd);
+  uint64_t wr = atomic_load(&g_wr);
+  int have = (int)(wr - rd);
+  int n = have < want ? have : want;
+  float target = (float)atomic_load(&g_volume) / 100.0f;
+  float step = n > 0 ? (target - g_gain_now) / (float)n : 0.0f;
+  int i;
+  (void)ud;
+  for (i = 0; i < n; i++) {
+    const int16_t *src = &g_ring[((rd + (uint64_t)i) % RING_FRAMES) * 2];
+    float g = g_gain_now + step * (float)(i + 1);
+    int l = (int)((float)src[0] * g);
+    int r = (int)((float)src[1] * g);
+    if (l > 32767) l = 32767;
+    if (l < -32768) l = -32768;
+    if (r > 32767) r = 32767;
+    if (r < -32768) r = -32768;
+    out[i * 2] = (int16_t)l;
+    out[i * 2 + 1] = (int16_t)r;
+  }
+  g_gain_now = target;
+  if (n < want) memset(out + n * 2, 0, (size_t)(want - n) * 4u);
+  atomic_store(&g_rd, rd + (uint64_t)n);
+  atomic_fetch_add(&g_played, (uint64_t)n);
+}
+
+/* Drop what has not been heard yet and set the clock. Safe from any thread. */
+static void ring_reset(uint64_t position_frames) {
+  if (g_dev) SDL_LockAudioDevice(g_dev);
+  atomic_store(&g_rd, atomic_load(&g_wr));
+  atomic_store(&g_played, position_frames);
+  if (g_dev) SDL_UnlockAudioDevice(g_dev);
+}
+
+static int ring_fill(void) { return (int)(atomic_load(&g_wr) - atomic_load(&g_rd)); }
+
+/* Copy frames into the ring, waiting for room. Returns -1 when stopped or seeking. */
+static int ring_write(const int16_t *pcm, int frames) {
+  while (frames > 0) {
+    int room;
+    int n;
+    uint64_t wr;
+    if (atomic_load(&g_stop)) return -1;
+    pthread_mutex_lock(&g_mu);
+    n = g_seek_req;
+    pthread_mutex_unlock(&g_mu);
+    if (n) return -1;
+    room = AHEAD_FRAMES - ring_fill();
+    if (room <= 0) {
+      usleep(5000);
+      continue;
+    }
+    n = frames < room ? frames : room;
+    wr = atomic_load(&g_wr);
+    for (int i = 0; i < n; i++) {
+      int16_t *d = &g_ring[((wr + (uint64_t)i) % RING_FRAMES) * 2];
+      d[0] = pcm[i * 2];
+      d[1] = pcm[i * 2 + 1];
+    }
+    atomic_store(&g_wr, wr + (uint64_t)n);
+    pcm += n * 2;
+    frames -= n;
+  }
+  return 0;
+}
 static unsigned char *g_owned;
 static unsigned char *g_audio;
 static int g_audio_n;
 static int g_audio_off;
-
-/* Full-scale PCM. The callback applies volume as it plays, so L2/R2 are not
- * stuck behind a second of already-queued audio. */
-#define RING_CAP (48000 * 4 * 2)
-static unsigned char g_ring[RING_CAP];
-static atomic_uint g_rhead;
-static atomic_uint g_rtail;
-
-static void ring_clear(void) {
-  atomic_store(&g_rtail, atomic_load(&g_rhead));
-}
-
-static void ring_write(const uint8_t *src, int n) {
-  while (n > 0 && !atomic_load(&g_stop)) {
-    uint32_t head = atomic_load(&g_rhead);
-    uint32_t tail = atomic_load(&g_rtail);
-    uint32_t used = head - tail;
-    uint32_t space = RING_CAP - used;
-    uint32_t chunk, pos, first;
-    if (space < 4096) {
-      usleep(4000);
-      continue;
-    }
-    chunk = (uint32_t)n;
-    if (chunk > space) chunk = space;
-    pos = head % RING_CAP;
-    first = RING_CAP - pos;
-    if (first > chunk) first = chunk;
-    memcpy(g_ring + pos, src, first);
-    if (chunk > first) memcpy(g_ring, src + first, chunk - first);
-    atomic_store(&g_rhead, head + chunk);
-    src += chunk;
-    n -= (int)chunk;
-  }
-}
-
-static void audio_cb(void *opaque, Uint8 *stream, int len) {
-  int16_t *out = (int16_t *)stream;
-  int samples = len / (int)sizeof(int16_t);
-  int vol = atomic_load(&g_volume);
-  int i = 0;
-  (void)opaque;
-  if (vol < 0) vol = 0;
-  if (vol > 100) vol = 100;
-  while (i < samples) {
-    uint32_t head = atomic_load(&g_rhead);
-    uint32_t tail = atomic_load(&g_rtail);
-    uint32_t avail = head - tail;
-    uint32_t pos, n, room;
-    const int16_t *in;
-    uint32_t k;
-    if (avail < 2) break;
-    pos = tail % RING_CAP;
-    n = (uint32_t)(samples - i);
-    if (n * 2 > avail) n = avail / 2;
-    room = (RING_CAP - pos) / 2;
-    if (n > room) n = room;
-    if (n < 1) break;
-    in = (const int16_t *)(g_ring + pos);
-    for (k = 0; k < n; k++) {
-      int s = (in[k] * vol) / 100;
-      if (s > 32767) s = 32767;
-      if (s < -32768) s = -32768;
-      out[i + (int)k] = (int16_t)s;
-    }
-    atomic_store(&g_rtail, tail + n * 2);
-    i += (int)n;
-  }
-  if (i < samples) memset(out + i, 0, (size_t)(samples - i) * sizeof(int16_t));
-}
 
 static int interrupt_cb(void *opaque) {
   (void)opaque;
@@ -129,6 +140,7 @@ int player_open(char *err, int err_n) {
   want.channels = 2;
   want.samples = 1024;
   want.callback = audio_cb;
+  want.userdata = NULL;
   g_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
   if (g_dev == 0) {
     snprintf(err, (size_t)err_n, "Audio: %s", SDL_GetError());
@@ -161,34 +173,18 @@ static int64_t mem_seek(void *opaque, int64_t off, int whence) {
   return g_audio_off;
 }
 
+/* Resample one frame (NULL flushes the resampler) to stereo S16 and hand it to the ring. */
 static void emit_frame(SwrContext *swr, AVFrame *frame) {
-  int out_count = swr_get_out_samples(swr, frame->nb_samples);
+  int in = frame ? frame->nb_samples : 0;
+  int out_count = swr_get_out_samples(swr, in);
   uint8_t *out = NULL;
   int linesize = 0;
   int got;
-  if (out_count < 1) out_count = frame->nb_samples;
+  if (out_count < 1) out_count = in > 0 ? in : 4096;
   if (av_samples_alloc(&out, &linesize, 2, out_count, AV_SAMPLE_FMT_S16, 0) < 0) return;
-  got = swr_convert(swr, &out, out_count, (const uint8_t **)frame->extended_data, frame->nb_samples);
-  if (got > 0) {
-    ring_write(out, got * 2 * (int)sizeof(int16_t));
-    atomic_fetch_add(&g_samples, (uint64_t)got);
-  }
-  av_freep(&out);
-}
-
-/* The resampler holds a few milliseconds after the last decoded frame. */
-static void flush_swr(SwrContext *swr) {
-  uint8_t *out = NULL;
-  int linesize = 0;
-  int out_count = swr_get_out_samples(swr, 0);
-  int got;
-  if (out_count < 1) return;
-  if (av_samples_alloc(&out, &linesize, 2, out_count, AV_SAMPLE_FMT_S16, 0) < 0) return;
-  got = swr_convert(swr, &out, out_count, NULL, 0);
-  if (got > 0) {
-    ring_write(out, got * 2 * (int)sizeof(int16_t));
-    atomic_fetch_add(&g_samples, (uint64_t)got);
-  }
+  got = swr_convert(swr, &out, out_count, frame ? (const uint8_t **)frame->extended_data : NULL,
+                    in);
+  if (got > 0) ring_write((const int16_t *)out, got);
   av_freep(&out);
 }
 
@@ -248,10 +244,14 @@ static void *decode_main(void *arg) {
     av_dict_set(&opts, "user_agent", ua[0] ? ua : ytm_stream_ua(), 0);
     av_dict_set(&opts, "referer", ref[0] ? ref : ytm_stream_referer(), 0);
     av_dict_set(&opts, "headers", "Origin: https://www.youtube.com\r\n", 0);
+    /* Seekable lets the HTTP layer resume a dropped connection with a Range request at
+     * the byte it stopped. With seekable 0 a drop near the end was read as end of file,
+     * and the song was cut short. */
     av_dict_set(&opts, "multiple_requests", "1", 0);
     av_dict_set(&opts, "reconnect", "1", 0);
     av_dict_set(&opts, "reconnect_streamed", "1", 0);
-    av_dict_set(&opts, "reconnect_delay_max", "2", 0);
+    av_dict_set(&opts, "reconnect_on_network_error", "1", 0);
+    av_dict_set(&opts, "reconnect_delay_max", "4", 0);
     av_dict_set(&opts, "rw_timeout", "15000000", 0);
     if (avformat_open_input(&fmt, url, NULL, &opts) < 0) {
       set_err("Could not open the audio stream");
@@ -315,10 +315,13 @@ static void *decode_main(void *arg) {
   }
 
   {
-    int stalls = 0;
+    int64_t last_pts = AV_NOPTS_VALUE;
+    int retries = 0;
+    int drained = 0;
     while (!atomic_load(&g_stop)) {
       int seek = 0;
       double seek_to = 0;
+      int rc;
       pthread_mutex_lock(&g_mu);
       if (g_seek_req) {
         seek = 1;
@@ -331,35 +334,43 @@ static void *decode_main(void *arg) {
         if (ts < 0) ts = 0;
         av_seek_frame(fmt, -1, ts, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(dec);
-        ring_clear();
-        atomic_store(&g_samples, (uint64_t)(seek_to * 48000.0));
+        swr_convert(swr, NULL, 0, NULL, 0);
+        ring_reset((uint64_t)(seek_to * OUT_RATE));
+        last_pts = AV_NOPTS_VALUE;
       }
 
-      if (atomic_load(&g_paused)) {
-        usleep(20000);
+      if (atomic_load(&g_paused) || ring_fill() >= AHEAD_FRAMES) {
+        usleep(10000);
         continue;
       }
 
-      if (av_read_frame(fmt, pkt) < 0) {
-        double pos = (double)atomic_load(&g_samples) / 48000.0;
-        double dur;
-        pthread_mutex_lock(&g_mu);
-        dur = g_duration_hint;
-        pthread_mutex_unlock(&g_mu);
-        /* A dropped connection near the end used to be treated as the end of the song. */
-        if (stalls < 2 && dur > 8 && pos + 8 < dur &&
-            av_seek_frame(fmt, -1, (int64_t)(pos * AV_TIME_BASE), AVSEEK_FLAG_ANY) >= 0) {
-          stalls++;
-          avcodec_flush_buffers(dec);
-          continue;
+      rc = av_read_frame(fmt, pkt);
+      if (rc < 0) {
+        /* A network error before the end: resume at the last packet instead of skipping. */
+        if (rc != AVERROR_EOF && !avio_feof(fmt->pb) && retries < 3 && last_pts != AV_NOPTS_VALUE &&
+            !atomic_load(&g_stop)) {
+          retries++;
+          if (av_seek_frame(fmt, si, last_pts, AVSEEK_FLAG_BACKWARD) >= 0) continue;
         }
+        if (rc != AVERROR_EOF && !avio_feof(fmt->pb) && !atomic_load(&g_stop)) {
+          char e[96];
+          av_strerror(rc, e, sizeof e);
+          fprintf(stderr, "ytmusic: stream read failed: %s\n", e);
+        }
+        drained = 1;
         break;
       }
-      stalls = 0;
       if (pkt->stream_index != si) {
         av_packet_unref(pkt);
         continue;
       }
+      /* After a resume, skip packets already played. */
+      if (last_pts != AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE && pkt->pts <= last_pts &&
+          retries > 0) {
+        av_packet_unref(pkt);
+        continue;
+      }
+      if (pkt->pts != AV_NOPTS_VALUE) last_pts = pkt->pts;
       if (avcodec_send_packet(dec, pkt) == 0) {
         while (avcodec_receive_frame(dec, frame) == 0) {
           emit_frame(swr, frame);
@@ -368,25 +379,21 @@ static void *decode_main(void *arg) {
       }
       av_packet_unref(pkt);
     }
-    if (!atomic_load(&g_stop) && dec && swr && frame) {
-      avcodec_send_packet(dec, NULL);
-      while (avcodec_receive_frame(dec, frame) == 0) {
-        emit_frame(swr, frame);
-        av_frame_unref(frame);
+    if (drained && !atomic_load(&g_stop)) {
+      /* End of file: the decoder and resampler still hold the last few frames. */
+      if (avcodec_send_packet(dec, NULL) == 0) {
+        while (avcodec_receive_frame(dec, frame) == 0) {
+          emit_frame(swr, frame);
+          av_frame_unref(frame);
+        }
       }
-      flush_swr(swr);
-      while (!atomic_load(&g_stop) && atomic_load(&g_rhead) != atomic_load(&g_rtail))
-        usleep(20000);
-      if (!atomic_load(&g_stop)) atomic_store(&g_ended, 1);
+      emit_frame(swr, NULL);
+      if (!atomic_load(&g_stop)) atomic_store(&g_eof, 1);
     }
   }
 
 done:
-  if (g_err[0] == 0 && atomic_load(&g_stop)) {
-    /* user skip, not a failure */
-  } else if (g_err[0] == 0 && !g_stop) {
-    /* natural end */
-  }
+  if (!atomic_load(&g_stop) && player_error()[0]) atomic_store(&g_eof, 1);
   if (swr) swr_free(&swr);
   if (pkt) av_packet_free(&pkt);
   if (frame) av_frame_free(&frame);
@@ -440,12 +447,11 @@ int player_start(const char *url, int duration_s) {
   g_seek_req = 0;
   g_duration_hint = duration_s > 0 ? duration_s : 0;
   pthread_mutex_unlock(&g_mu);
-  atomic_store(&g_samples, 0);
-  atomic_store(&g_ended, 0);
+  atomic_store(&g_eof, 0);
   atomic_store(&g_stop, 0);
   atomic_store(&g_paused, 0);
-  atomic_store(&g_rhead, 0);
-  atomic_store(&g_rtail, 0);
+  g_drained_at = 0;
+  ring_reset(0);
   SDL_PauseAudioDevice(g_dev, 0);
   if (pthread_create(&g_thread, NULL, decode_main, NULL) != 0) {
     set_err("Could not start the decoder thread");
@@ -481,12 +487,11 @@ int player_start_mem(unsigned char *data, int n, int duration_s) {
   g_seek_req = 0;
   g_duration_hint = duration_s > 0 ? duration_s : 0;
   pthread_mutex_unlock(&g_mu);
-  atomic_store(&g_samples, 0);
-  atomic_store(&g_ended, 0);
+  atomic_store(&g_eof, 0);
   atomic_store(&g_stop, 0);
   atomic_store(&g_paused, 0);
-  atomic_store(&g_rhead, 0);
-  atomic_store(&g_rtail, 0);
+  g_drained_at = 0;
+  ring_reset(0);
   SDL_PauseAudioDevice(g_dev, 0);
   if (pthread_create(&g_thread, NULL, decode_main, NULL) != 0) {
     set_err("Could not start the decoder thread");
@@ -523,10 +528,7 @@ void player_stop(void) {
   pthread_join(g_thread, NULL);
   g_thread_live = 0;
   atomic_store(&g_stop, 0);
-  if (g_dev) SDL_PauseAudioDevice(g_dev, 1);
-  atomic_store(&g_rhead, 0);
-  atomic_store(&g_rtail, 0);
-  if (g_dev) SDL_PauseAudioDevice(g_dev, 0);
+  ring_reset(0);
 }
 
 void player_close(void) {
@@ -570,15 +572,31 @@ void player_volume_add(int delta) {
 }
 
 int player_paused(void) { return atomic_load(&g_paused); }
-int player_ended(void) { return atomic_load(&g_ended); }
-void player_ack_ended(void) { atomic_store(&g_ended, 0); }
+/* Ended only after the last sample has been played out, not when the file is read.
+ * Moving on as soon as the read finished cleared about a second of the song's tail. */
+int player_ended(void) {
+  if (!atomic_load(&g_eof)) return 0;
+  if (ring_fill() > 0 && !atomic_load(&g_paused)) {
+    g_drained_at = 0;
+    return 0;
+  }
+  if (ring_fill() > 0) return 0;
+  if (g_drained_at == 0) {
+    g_drained_at = SDL_GetTicks();
+    if (g_drained_at == 0) g_drained_at = 1;
+    return 0;
+  }
+  /* The device still holds one callback buffer (about 21 ms). */
+  return SDL_GetTicks() - g_drained_at >= 120;
+}
+
+void player_ack_ended(void) {
+  atomic_store(&g_eof, 0);
+  g_drained_at = 0;
+}
 
 double player_position(void) {
-  uint32_t queued = atomic_load(&g_rhead) - atomic_load(&g_rtail);
-  double decoded = (double)atomic_load(&g_samples) / 48000.0;
-  double q = (double)queued / (48000.0 * 4.0);
-  double pos = decoded - q;
-  return pos < 0 ? 0 : pos;
+  return (double)atomic_load(&g_played) / (double)OUT_RATE;
 }
 
 double player_duration(void) {
