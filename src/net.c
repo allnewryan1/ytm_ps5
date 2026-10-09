@@ -39,13 +39,15 @@ static int g_tmpl = -1;
 static char *g_resp;
 
 #define COVER_SIDE 128
-#define COVER_SLOTS 18
+#define COVER_SLOTS 36
 typedef struct {
   char key[80];
   unsigned char *px;
+  unsigned stamp;
+  int fails;
 } CoverSlot;
 static CoverSlot g_cover[COVER_SLOTS];
-static int g_cover_n;
+static unsigned g_cover_tick;
 
 static void cover_clear(void) {
   int i;
@@ -53,8 +55,9 @@ static void cover_clear(void) {
     free(g_cover[i].px);
     g_cover[i].px = NULL;
     g_cover[i].key[0] = 0;
+    g_cover[i].stamp = 0;
+    g_cover[i].fails = 0;
   }
-  g_cover_n = 0;
 }
 
 static int hex_nibble(char c) {
@@ -1143,6 +1146,121 @@ int ytm_browse(const char *browse_id, Track *out, int max, char *err, int err_n)
   return remix_browse(browse_id, 0, out, max, err, err_n);
 }
 
+/* Bearer auth belongs on the TV client. WEB_REMIX rejects it with HTTP 400. */
+static int tv_browse(const char *browse_id, Track *out, int max, char *err, int err_n) {
+  char body[512];
+  char url[192];
+  int status = 0;
+  int n;
+  snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false");
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
+           "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "\"browseId\":\"%s\"}",
+           TV_VER, browse_id);
+  if (http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
+                   TV_VER, 1, 1, &status, err, err_n) < 0 || status != 200)
+    return -1;
+  n = collect_tracks(g_resp, out, max);
+  if (n == 0) snprintf(err, (size_t)err_n, "No songs in that library");
+  else err[0] = 0;
+  return n;
+}
+
+int ytm_liked(Track *out, int max, char *err, int err_n) {
+  int n = 0;
+  if (ensure_access(err, err_n) != 0) return -1;
+  /* WEB_REMIX plus a bearer token is a 400. The TV client accepts this token. */
+  n = tv_browse("VLLM", out, max, err, err_n);
+  if (n > 0) return n;
+  n = tv_browse("FEmusic_liked_playlists", out, max, err, err_n);
+  if (n > 0) return n;
+  n = tv_browse("FEmusic_library_landing", out, max, err, err_n);
+  if (n == 0 && !err[0]) snprintf(err, (size_t)err_n, "No songs in that library");
+  return n;
+}
+
+int ytm_home(Track *out, int max, char *err, int err_n) {
+  char body[640];
+  char url[256];
+  int status = 0;
+  int n;
+  int authed = 0;
+  if (g_refresh[0] && ensure_access(err, err_n) == 0) authed = 1;
+  if (authed) {
+    n = tv_browse("FEmusic_home", out, max, err, err_n);
+    if (n > 0) return n;
+  }
+  snprintf(url, sizeof url,
+           "https://music.youtube.com/youtubei/v1/browse?key=%s&prettyPrint=false", INNERTUBE_KEY);
+  snprintf(body, sizeof body,
+           "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\","
+           "\"clientVersion\":\"1.20251001.01.00\",\"hl\":\"en\",\"gl\":\"US\"}},"
+           "\"browseId\":\"FEmusic_home\"}");
+  if (http_post_ex(url, body, NULL, "https://music.youtube.com", "https://music.youtube.com/",
+                   NULL, NULL, 0, 0, &status, err, err_n) < 0)
+    return -1;
+  n = collect_tracks(g_resp, out, max);
+  if (n == 0) snprintf(err, (size_t)err_n, "No recommendations");
+  else err[0] = 0;
+  return n;
+}
+
+#define PRE_SLOTS 4
+typedef struct {
+  char id[YTM_ID_LEN];
+  char url[4096];
+  int duration;
+  int ready;
+} PreSlot;
+static PreSlot g_pre[PRE_SLOTS];
+static int g_pre_next;
+
+static PreSlot *pre_find(const char *id) {
+  int i;
+  if (!id || !id[0]) return NULL;
+  for (i = 0; i < PRE_SLOTS; i++) {
+    if (g_pre[i].id[0] && strcmp(g_pre[i].id, id) == 0) return &g_pre[i];
+  }
+  return NULL;
+}
+
+int ytm_prefetch_audio(const char *video_id) {
+  PreSlot *slot;
+  char err[192];
+  char url[4096];
+  int dur = 0;
+  if (!video_id || !video_id[0]) return -1;
+  slot = pre_find(video_id);
+  if (slot && slot->ready) return 0;
+  if (!slot) {
+    slot = &g_pre[g_pre_next++ % PRE_SLOTS];
+    slot->id[0] = 0;
+    slot->ready = 0;
+  }
+  if (ytm_audio_url(video_id, url, (int)sizeof url, &dur, err, (int)sizeof err) != 0) return -1;
+  snprintf(slot->id, sizeof slot->id, "%s", video_id);
+  snprintf(slot->url, sizeof slot->url, "%s", url);
+  slot->duration = dur;
+  slot->ready = 1;
+  return 0;
+}
+
+const char *ytm_prefetch_url(const char *video_id, int *duration) {
+  PreSlot *slot = pre_find(video_id);
+  if (!slot || !slot->ready) return NULL;
+  if (duration && slot->duration > 0) *duration = slot->duration;
+  return slot->url;
+}
+
+void ytm_prefetch_drop(const char *video_id) {
+  PreSlot *slot = pre_find(video_id);
+  if (!slot) return;
+  slot->id[0] = 0;
+  slot->ready = 0;
+  slot->url[0] = 0;
+}
+
 static int http_get_bin(const char *url, unsigned char *buf, int cap, int *status) {
   int req, total = 0, n;
   if (!buf || cap < 8 || g_tmpl < 0) return -1;
@@ -1163,42 +1281,6 @@ static int http_get_bin(const char *url, unsigned char *buf, int cap, int *statu
   return total;
 }
 
-static int http_get_json(const char *url, int *status, char *err, int err_n) {
-  int req, total = 0, n;
-  if (!g_resp || g_tmpl < 0) {
-    snprintf(err, (size_t)err_n, "Network is not up");
-    return -1;
-  }
-  req = sceHttp2CreateRequestWithURL(g_tmpl, "GET", url, 0);
-  if (req < 0) {
-    snprintf(err, (size_t)err_n, "HTTP create %d", req);
-    return -1;
-  }
-  sceHttp2AddRequestHeader(req, "Accept", "application/json", SCE_HTTP_HEADER_OVERWRITE);
-  if (g_access[0]) {
-    char auth[2100];
-    snprintf(auth, sizeof auth, "Bearer %s", g_access);
-    sceHttp2AddRequestHeader(req, "Authorization", auth, SCE_HTTP_HEADER_OVERWRITE);
-  }
-  if (sceHttp2SendRequest(req, "", 0) != 0) {
-    sceHttp2DeleteRequest(req);
-    snprintf(err, (size_t)err_n, "HTTP send failed");
-    return -1;
-  }
-  *status = 0;
-  sceHttp2GetStatusCode(req, status);
-  while (total + 1 < RESP_MAX &&
-         (n = sceHttp2ReadData(req, g_resp + total, (size_t)(RESP_MAX - total - 1))) > 0)
-    total += n;
-  g_resp[total] = 0;
-  sceHttp2DeleteRequest(req);
-  if (*status != 200) {
-    snprintf(err, (size_t)err_n, "YouTube HTTP %d", *status);
-    return -1;
-  }
-  return total;
-}
-
 static const char *cover_key_of(const Track *t, char *tmp, int n) {
   if (t->id[0]) snprintf(tmp, (size_t)n, "%s", t->id);
   else if (t->browse[0]) snprintf(tmp, (size_t)n, "%s", t->browse);
@@ -1208,10 +1290,26 @@ static const char *cover_key_of(const Track *t, char *tmp, int n) {
 
 static CoverSlot *cover_find(const char *key) {
   int i;
-  for (i = 0; i < g_cover_n; i++) {
-    if (strcmp(g_cover[i].key, key) == 0) return &g_cover[i];
+  for (i = 0; i < COVER_SLOTS; i++) {
+    if (g_cover[i].key[0] && strcmp(g_cover[i].key, key) == 0) return &g_cover[i];
   }
   return NULL;
+}
+
+static CoverSlot *cover_slot(const char *key) {
+  CoverSlot *slot = cover_find(key);
+  CoverSlot *victim = NULL;
+  int i;
+  if (slot) return slot;
+  for (i = 0; i < COVER_SLOTS; i++) {
+    if (!g_cover[i].key[0]) return &g_cover[i];
+    if (!victim || g_cover[i].stamp < victim->stamp) victim = &g_cover[i];
+  }
+  free(victim->px);
+  victim->px = NULL;
+  victim->key[0] = 0;
+  victim->fails = 0;
+  return victim;
 }
 
 int ytm_cover_fetch(const Track *t) {
@@ -1234,8 +1332,12 @@ int ytm_cover_fetch(const Track *t) {
   cover_key_of(t, key, (int)sizeof key);
   if (!key[0]) return -1;
   slot = cover_find(key);
-  if (slot) return slot->px ? 0 : -1;
-  if (g_cover_n >= COVER_SLOTS) return -1;
+  if (slot && slot->px) {
+    slot->stamp = ++g_cover_tick;
+    return 0;
+  }
+  if (slot && slot->fails >= 2) return -1;
+  slot = cover_slot(key);
   buf = (unsigned char *)malloc(180 * 1024);
   dst = (unsigned char *)malloc((size_t)COVER_SIDE * COVER_SIDE * 4u);
   if (!buf || !dst) {
@@ -1244,11 +1346,21 @@ int ytm_cover_fetch(const Track *t) {
     return -1;
   }
   n = http_get_bin(src, buf, 180 * 1024, &status);
-  slot = &g_cover[g_cover_n++];
-  snprintf(slot->key, sizeof slot->key, "%s", key);
-  slot->px = NULL;
-  if (n > 64 && status == 200 && art_jpeg_square(buf, n, dst, COVER_SIDE) == 0) slot->px = dst;
-  else free(dst);
+  if (n > 64 && status == 200 && art_jpeg_square(buf, n, dst, COVER_SIDE) == 0) {
+    free(slot->px);
+    slot->px = dst;
+    slot->fails = 0;
+    snprintf(slot->key, sizeof slot->key, "%s", key);
+    slot->stamp = ++g_cover_tick;
+  } else {
+    free(dst);
+    if (slot->key[0] && strcmp(slot->key, key) == 0) slot->fails++;
+    else if (!slot->key[0]) {
+      snprintf(slot->key, sizeof slot->key, "%s", key);
+      slot->fails = 1;
+      slot->stamp = ++g_cover_tick;
+    }
+  }
   free(buf);
   return slot->px ? 0 : -1;
 }
@@ -1260,78 +1372,10 @@ const unsigned char *ytm_cover_pixels(const Track *t, int *w, int *h) {
   cover_key_of(t, key, (int)sizeof key);
   slot = cover_find(key);
   if (!slot || !slot->px) return NULL;
+  slot->stamp = ++g_cover_tick;
   if (w) *w = COVER_SIDE;
   if (h) *h = COVER_SIDE;
   return slot->px;
-}
-
-static int data_playlist(const char *pl, Track *out, int max, char *err, int err_n) {
-  char url[420];
-  int status = 0;
-  int n;
-  int ask = max > 40 ? 40 : max;
-  if (ask < 1) ask = 1;
-  snprintf(url, sizeof url,
-           "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails"
-           "&maxResults=%d&playlistId=%s",
-           ask, pl);
-  if (http_get_json(url, &status, err, err_n) < 0) {
-    snprintf(url, sizeof url,
-             "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails"
-             "&maxResults=%d&playlistId=%s&key=%s",
-             ask, pl, INNERTUBE_KEY);
-    if (http_get_json(url, &status, err, err_n) < 0) return -1;
-  }
-  n = collect_api(g_resp, out, max);
-  if (n == 0) snprintf(err, (size_t)err_n, "No songs in that library");
-  return n;
-}
-
-static int browse_tracks(const char *host, const char *browse_id, Track *out, int max, char *err,
-                         int err_n) {
-  char body[512];
-  char url[192];
-  int status = 0;
-  int n;
-  snprintf(url, sizeof url, "https://%s/youtubei/v1/browse?prettyPrint=false", host);
-  snprintf(body, sizeof body,
-           "{\"context\":{\"client\":{\"clientName\":\"TVHTML5\","
-           "\"clientVersion\":\"%s\",\"hl\":\"en\",\"gl\":\"US\"}},"
-           "\"browseId\":\"%s\"}",
-           TV_VER, browse_id);
-  if (http_post_ex(url, body, TV_UA, "https://www.youtube.com", "https://www.youtube.com/tv", "7",
-                   TV_VER, 1, 0, &status, err, err_n) < 0)
-    return -1;
-  n = collect_tracks(g_resp, out, max);
-  if (n == 0) snprintf(err, (size_t)err_n, "No songs in that library");
-  return n;
-}
-
-int ytm_liked(Track *out, int max, char *err, int err_n) {
-  int n;
-  if (ensure_access(err, err_n) != 0) return -1;
-  /* The device token is a YouTube Data API token. Liked music is playlist LM. */
-  n = data_playlist("LM", out, max, err, err_n);
-  if (n > 0) return n;
-  n = data_playlist("LL", out, max, err, err_n);
-  if (n > 0) return n;
-  n = browse_tracks("www.youtube.com", "VLLM", out, max, err, err_n);
-  if (n > 0) return n;
-  n = browse_tracks("music.youtube.com", "VLLM", out, max, err, err_n);
-  if (n > 0) return n;
-  n = browse_tracks("www.youtube.com", "FEmusic_liked_videos", out, max, err, err_n);
-  if (n > 0) return n;
-  n = remix_browse("VLLM", 1, out, max, err, err_n);
-  if (n > 0) return n;
-  n = remix_browse("FEmusic_liked_videos", 1, out, max, err, err_n);
-  if (n == 0) {
-    if (g_resp && (strstr(g_resp, "logged_in\",\"value\":\"0\"") ||
-                   strstr(g_resp, "Sign in to listen")))
-      snprintf(err, (size_t)err_n, "Sign-in was not accepted for the library");
-    else if (!err[0])
-      snprintf(err, (size_t)err_n, "No liked songs on this account");
-  }
-  return n;
 }
 
 #ifdef YTM_PARSE_TEST

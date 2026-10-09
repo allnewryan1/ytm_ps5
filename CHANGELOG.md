@@ -1,9 +1,19 @@
 # Changelog
 
+## 0.2.0
+
+- Up next is a queue. Triangle opens it, X plays the highlighted row, and the bar shows how many songs remain.
+- Circle returns to the section you left, including its highlight, instead of always jumping home.
+- Covers stay cached and the oldest one is dropped when the cache fills, so later rows still get art. The next song's audio URL is fetched while the current one plays.
+- Library asks the TV client, which accepts the device sign-in. The music web client was answering HTTP 400.
+- Repeat icons are drawn larger so they stay readable on the player screen.
+- A signed-in home asks for that account's recommendations. Without a sign-in, the mood shelves stay.
+
 ## 0.1.0
 
 - First payload: YouTube Music search, shelves, and playback.
 - Explore lists New releases, Charts, and Trending from YouTube Music. Options still opens the search keyboard.
+
 - Song, artist, album, and playlist names are read from the catalog objects, including accented characters.
 - Covers are downloaded for the playing song and the rows on screen.
 - Home left and right stay on the shelf until the left edge, which returns to the menu.

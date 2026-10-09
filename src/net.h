@@ -32,8 +32,16 @@ void ytm_set_refresh_token(const char *token);
 /* Liked songs for the signed-in account. */
 int ytm_liked(Track *out, int max, char *err, int err_n);
 
+/* Home feed. Signed-in accounts get that account's recommendations. */
+int ytm_home(Track *out, int max, char *err, int err_n);
+
 /* Download one cover into the cache. Safe to call again. */
 int ytm_cover_fetch(const Track *t);
 const unsigned char *ytm_cover_pixels(const Track *t, int *w, int *h);
+
+/* Resolve the next track's audio URL and keep it until play. */
+int ytm_prefetch_audio(const char *video_id);
+const char *ytm_prefetch_url(const char *video_id, int *duration);
+void ytm_prefetch_drop(const char *video_id);
 
 #endif
