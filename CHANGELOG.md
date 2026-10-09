@@ -11,3 +11,4 @@
 - Home screen title is YouTube Music. The install folder is still `PPSA99105`.
 - Icon and background art are a record and a listening room, not the old play-button tile.
 - Scanout memory comes from the game direct-memory pool. Leaving the process no longer uses the exit syscall the shell reports as a crash.
+- The picture is drawn on the window framebuffer. This SDL port has no render driver.

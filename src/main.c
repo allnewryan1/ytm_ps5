@@ -34,7 +34,6 @@ static const char *moods[][2] = {
 };
 
 static SDL_Window *g_win;
-static SDL_Renderer *g_ren;
 static SDL_GameController *g_pad;
 static Uint8 g_prev[32];
 static int g_hold;
@@ -457,13 +456,21 @@ static void draw_cover(Draw *d, int x, int y, int size, const char *label, int r
   draw_text(d, x + size / 2 - 12, y + size / 2 - 16, size > 120 ? 5 : 3, 255, 255, 255, letter);
 }
 
+static void present(void) {
+  static int told;
+  if (SDL_UpdateWindowSurface(g_win) == 0) return;
+  if (told) return;
+  told = 1;
+  toast(SDL_GetError());
+}
+
 static void paint(void) {
   Draw d;
   char line[180];
+  SDL_Surface *surf = SDL_GetWindowSurface(g_win);
   const Track *now = (g_qindex >= 0 && g_qindex < g_nqueue) ? &g_queue[g_qindex] : NULL;
-  SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255);
-  SDL_RenderClear(g_ren);
-  draw_begin(&d, g_ren);
+  if (!surf) return;
+  draw_begin(&d, surf);
 
   fill_v(&d, 0, 0, 1920, 1080, 3, 3, 3);
 
@@ -503,7 +510,7 @@ static void paint(void) {
       fit(line, (int)sizeof line, player_error(), 2, 1200);
       draw_text(&d, 360, 960, 2, 255, 80, 80, line);
     }
-    SDL_RenderPresent(g_ren);
+    present();
     return;
   }
 
@@ -645,7 +652,7 @@ static void paint(void) {
   } else {
     draw_text(&d, 36, BOTTOM + 40, 2, 150, 150, 150, "Nothing playing");
   }
-  SDL_RenderPresent(g_ren);
+  present();
 }
 
 static int edge(SDL_GameControllerButton b) {
@@ -766,13 +773,13 @@ int main(int argc, char **argv) {
     printf("ytmusic: audio: %s\n", SDL_GetError());
   if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
     printf("ytmusic: pad: %s\n", SDL_GetError());
+  /* This SDL port has a window framebuffer and no render driver. */
+  SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
   g_win = SDL_CreateWindow("YouTube Music", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1920,
                            1080, SDL_WINDOW_FULLSCREEN_DESKTOP);
   if (!g_win) g_win = SDL_CreateWindow("YouTube Music", 0, 0, 1920, 1080, 0);
   if (!g_win) park(SDL_GetError());
-  g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-  if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
-  if (!g_ren) park(SDL_GetError());
+  if (!SDL_GetWindowSurface(g_win)) park(SDL_GetError());
   SDL_StartTextInput();
   if (player_open(err, (int)sizeof err) != 0) set_status(err);
   if (net_init(err, (int)sizeof err) != 0) set_status(err);
@@ -789,7 +796,6 @@ int main(int argc, char **argv) {
   player_close();
   net_shutdown();
   if (g_pad) SDL_GameControllerClose(g_pad);
-  SDL_DestroyRenderer(g_ren);
   SDL_DestroyWindow(g_win);
   SDL_Quit();
   return 0;
