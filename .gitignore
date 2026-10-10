@@ -3,3 +3,4 @@ dist/
 build/
 *.o
 sce_module/*.prx
+ytm-audioprobe.elf
