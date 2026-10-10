@@ -65,10 +65,21 @@ EXEC /app0/eboot2.bin [user] ... abi=native category=custom_music_core
 
 From then on, the process `NPXS40201 CustomMusicCore` stays up while Spotify is suspended in a game.
 
-Our native media app with the same `musicCore*` lines gets "MusicPlayerService: MediaApp launch start." but no `launchApp(NPXS40201)`. Something the app does has to ask for the core. Spotify's process runs the system web runtime, so whatever it calls is available to an app process. The likeliest call is `sceSystemServiceAcquireBgmCpuBudget`; the bgprobe v4 test checks that.
+Our native media app with the same `musicCore*` lines gets "MusicPlayerService: MediaApp launch start." but no `launchApp(NPXS40201)`. Asking for the BGM CPU budget (`sceSystemServiceAcquireBgmCpuBudget(0)`, which returns 0) doesn't change that.
+
+## Tests so far (PPSA99106, declared as a Web Based Media App)
+
+- The system web-app launcher runs it, with the same process set Spotify gets: SceWebAppLauncher, NKUIProcess, NKNetworkProcessMediaApp, NKWebProcessMediaApp and SlimGLServerProcess. The page loads (`[PSM] Got handle`, `CanvasView first render`), but the core is still never launched.
+- `app.db` (`/system_data/priv/mms/app.db`, table `tbl_contentinfo`, column `AppInfoJson`) stores `MUSIC_CORE_NAME: CustomMusicCore` for both Spotify and our folder app, so ShadowMountPlus keeps the field.
+- Differences that remain:
+  - `_contents_location`: 0 for Spotify (a real PFS package, `/user/app/PPSA05688/app.pkg`), 2 for our homebrew folder.
+  - The web page: Spotify's TV app versus a placeholder.
+  - In Spotify's log, the launcher makes a second AppDb query right before the core launch. Ours never makes it.
+- The system keeps a data folder for the core at `/system_data/music_core/NPXS40201/`. It was empty here.
+- Next: decrypt and read SceWebAppLauncher (`/web_app_launcher/eboot.bin`) to find what it checks before `launchApp(NPXS40201)`.
 
 ## Status
 
 `src/musiccore.c` is a test core with this exact shape. It logs every callback as `ytmcore:` in the kernel log and plays a pulsed tone when the system starts it. Still unknown:
-- Whether the system starts a core for a native media app (category 65536).
+- What makes the launcher start a core. It starts one for Spotify, but not for a native media app or a folder-installed web media app.
 - What the remaining slots mean.
