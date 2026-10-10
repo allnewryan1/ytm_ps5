@@ -1,4 +1,5 @@
 #include "app.h"
+#include "bgprobe.h"
 #include "daemon_client.h"
 #include "net.h"
 #include "player.h"
@@ -889,6 +890,13 @@ static void on_activate(void) {
     else if (g_nlikes > 0) play_or_open(g_likes, g_nlikes, g_sel);
     else open_library();
   } else if (g_body == BODY_ACCOUNT) {
+    if (g_acct_sel == 1) {
+      /* Nothing else may play while it runs. */
+      player_stop();
+      if (bgprobe_start() == 0) set_status("Background audio test running: go to the home screen");
+      else set_status("The background audio test is already running");
+      return;
+    }
     if (!ytm_signed_in()) {
       start_code();
       return;
@@ -1073,7 +1081,7 @@ static void on_move(int dx, int dy) {
       g_zone = ZONE_NAV;
       return;
     }
-    if (ytm_signed_in() && dy) g_acct_sel = 0;
+    if (dy) g_acct_sel = dy > 0 ? 1 : 0;
     return;
   }
   g_sel += dy;
@@ -1594,10 +1602,19 @@ static void paint(void) {
       }
       {
         int y = 180;
-        int sel = (g_zone == ZONE_BODY);
+        int sel = (g_zone == ZONE_BODY && g_acct_sel == 0);
         fill_round(&d, RAIL + 28, y, 280, 56, 28, sel ? 147 : 57, sel ? 0 : 51, sel ? 10 : 50);
         draw_text(&d, RAIL + 52, y + 14, 1, sel ? 255 : 240, sel ? 218 : 222, sel ? 214 : 220, rows[0]);
       }
+    }
+    {
+      /* Down to reach it, in both states. */
+      int y = 740;
+      int sel = (g_zone == ZONE_BODY && g_acct_sel == 1);
+      const char *label = bgprobe_running() ? "Background audio test running" : "Background audio test";
+      int w = text_px(label, 1) + 56;
+      fill_round(&d, RAIL + 28, y, w, 56, 28, sel ? 147 : 57, sel ? 0 : 51, sel ? 10 : 50);
+      draw_text(&d, RAIL + 56, y + 14, 1, sel ? 255 : 240, sel ? 218 : 222, sel ? 214 : 220, label);
     }
   } else {
     Track *list = g_body == BODY_LIBRARY ? g_likes : g_results;

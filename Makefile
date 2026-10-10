@@ -25,7 +25,7 @@ endif
 
 ELF := ytmusic.elf
 
-SRCS := src/main.c src/text.c src/net.c src/player.c src/latebind.c src/art.c src/daemon_client.c
+SRCS := src/main.c src/text.c src/net.c src/player.c src/latebind.c src/art.c src/daemon_client.c src/bgprobe.c
 
 # ytmusicd, the background payload. It is always a loader payload (the app sends it to the
 # ELF loader on port 9021), stripped and embedded in both app builds by src/daemon_blob.S.
