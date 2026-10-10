@@ -76,7 +76,7 @@ NATIVE_STUBS := $(filter-out %/libkernel_sys.so %/libkernel_web.so %/libkernel_s
 NATIVE_LIBC := $(NATIVE_DIR)/libc-nodl.a
 NATIVE_COMPAT := $(NATIVE_DIR)/payload_compat.o
 
-.PHONY: all clean test package probe daemon
+.PHONY: all clean test package probe daemon core
 
 all: $(ELF)
 
@@ -147,10 +147,43 @@ $(PROBE): tools/audioprobe.c
 
 clean:
 	rm -f $(ELF) $(PROBE)
-	rm -rf dist build/native $(DAEMON) $(DAEMON_STRIPPED)
+	rm -rf dist build/native build/core $(DAEMON) $(DAEMON_STRIPPED)
 
 test: $(ELF)
 	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $(ELF)
 
-package: $(ELF) $(NATIVE_ELF)
+# Music core: the second ELF a media app ships as app0/eboot2.bin, which the system starts
+# for background audio (see src/musiccore.c). No libc; libkernel and the music libraries.
+CORE_DIR := build/core
+CORE_STUB_LIBS := MusicCoreInterface CustomMusicAudioOut CustomMusicSysCallWrapper
+CORE_STUBS := $(patsubst %,$(CORE_DIR)/libSce%.so,$(CORE_STUB_LIBS))
+CORE_PIE := $(CORE_DIR)/core-pie.elf
+CORE_ELF := $(CORE_DIR)/eboot2.elf
+
+$(CORE_DIR)/libSce%.so: tools/musiccore-stubs/stubs.c
+	mkdir -p $(dir $@)
+	$(CC) -shared -nostdlib -fPIC -DLIB_$* -Wl,-soname,libSce$*.sprx -o $@ $<
+
+$(CORE_DIR)/musiccore.o: src/musiccore.c
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -Wall -Wextra -O2 -fPIC -ffreestanding -fno-builtin -fno-stack-protector \
+		-ffunction-sections -fdata-sections -c -o $@ $<
+
+$(CORE_PIE): $(CORE_DIR)/musiccore.o $(CORE_STUBS) third_party/ps5-native/ps5-pie.ld
+	$(LD) -T third_party/ps5-native/ps5-pie.ld \
+		--version-script third_party/ps5-native/app-symbols.map \
+		-e _start -o $@ $(CORE_DIR)/musiccore.o \
+		$(PS5_PAYLOAD_SDK)/target/lib/libkernel.so $(PS5_PAYLOAD_SDK)/target/lib/libSceSysmodule.so \
+		$(CORE_STUBS)
+
+$(CORE_ELF): $(CORE_PIE) scripts/build-self-tool.sh
+	tool=$$(sh scripts/build-self-tool.sh); \
+	"$$tool" link --in $(CORE_PIE) --out $@ \
+		--stub-dir $(PS5_PAYLOAD_SDK)/target/lib $(patsubst %,--stub %,$(CORE_STUBS)) \
+		--module-sdk 0x02000009 --companion-sdk 0x08050001 \
+		--heap-size 0x1000000 --file-name eboot2.elf
+
+core: $(CORE_ELF)
+
+package: $(ELF) $(NATIVE_ELF) $(CORE_ELF)
 	sh scripts/package-homebrew.sh

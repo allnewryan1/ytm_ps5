@@ -1,6 +1,7 @@
 #!/bin/sh
 # Folder ShadowMountPlus scans under /data/homebrew/PPSA99105/:
 #   eboot.bin              development FSELF (magic 0x1D3D154F)
+#   eboot2.bin             music core, started by the system for background audio
 #   sce_module/libc.prx    clean-room runtime shim
 #   sce_sys/               param.json, icon0.png, pic0.dds, pic1.dds
 set -eu
@@ -26,6 +27,10 @@ app="$root/dist/PPSA99105"
 rm -rf "$app"
 mkdir -p "$app/sce_sys" "$app/sce_module"
 "$tool" self --sign --in "$root/build/native/eboot.elf" --out "$app/eboot.bin" --magic 0x1D3D154F
+# The music core the system starts for background audio (param.json musicCoreName).
+if [ -f "$root/build/core/eboot2.elf" ]; then
+    "$tool" self --sign --in "$root/build/core/eboot2.elf" --out "$app/eboot2.bin" --magic 0x1D3D154F
+fi
 cp "$libc" "$app/sce_module/libc.prx"
 cp "$root/meta/homebrew.js" "$app/homebrew.js"
 cp "$root/meta/param.json" "$app/sce_sys/param.json"
