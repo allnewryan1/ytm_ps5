@@ -1,9 +1,12 @@
 /* Audio probe: which sceAudioOut path stays audible while a game has focus?
  *
- * Send this to the ELF loader (port 9021), then open a game within 45 seconds.
- * The probe runs three rounds of six methods. Each method plays its number as
+ * v2. Send this to the ELF loader (port 9021) from the home screen and stay there.
+ * Phase 1, on the home screen: methods 1 and 2 play a 4-second tone each.
+ * Then it asks you to open a game within 45 seconds.
+ * Phase 2, in the game: three rounds of six methods. Each plays its number as
  * short beeps, then a 6-second tone, and shows a notification naming it.
- * Return codes go to /data/ytmusic/audioprobe.log. Report which numbers you heard.
+ * Return codes and how long each tone took to play go to /data/ytmusic/audioprobe.log:
+ * a port that really plays blocks for the tone's length; one that discards returns early.
  */
 #include <math.h>
 #include <stdarg.h>
@@ -11,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 int sceAudioOutInit(void);
@@ -61,6 +65,12 @@ static void note(const char *fmt, ...) {
   fflush(g_log);
 }
 
+static long long now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 /* Play `ms` of a sine at `hz` (0 = silence). Returns the first output error, or 0. */
 static int play(int h, double hz, int ms) {
   static int16_t buf[GRAIN * 2];
@@ -100,6 +110,20 @@ static const Method methods[] = {
 };
 #define NMETHODS (int)(sizeof methods / sizeof methods[0])
 
+static int open_method(const Method *me, int fg) {
+  int user = me->fg_user ? fg : USER_SYSTEM;
+  return me->sys ? sceAudioOutSysOpen(user, me->port, 0, GRAIN, RATE, FMT_S16_STEREO)
+                 : sceAudioOutOpen(user, me->port, 0, GRAIN, RATE, FMT_S16_STEREO);
+}
+
+/* Tone for ms, logged with how long the port took to accept it. */
+static int timed_tone(int h, const char *label, int ms) {
+  long long t0 = now_ms();
+  int rc = play(h, 440, ms);
+  note("%s: %d ms tone took %lld ms, output -> 0x%08x", label, ms, now_ms() - t0, (unsigned)rc);
+  return rc;
+}
+
 int main(void) {
   int fg = -1;
   int rc;
@@ -111,6 +135,21 @@ int main(void) {
   note("sceUserServiceGetForegroundUser: 0x%08x user=%d", (unsigned)rc, fg);
   rc = sceAudioOutInit();
   note("sceAudioOutInit: 0x%08x", (unsigned)rc);
+
+  /* Phase 1: on the home screen. Can this process be heard at all? */
+  for (int m = 0; m < 2; m++) {
+    char label[64];
+    int h = open_method(&methods[m], fg);
+    snprintf(label, sizeof label, "home method %d", m + 1);
+    note("%s (%s): open -> 0x%08x", label, methods[m].name, (unsigned)h);
+    if (h < 0) continue;
+    say("Home screen test %d of 2: %s", m + 1, methods[m].name);
+    play(h, 0, 500);
+    timed_tone(h, label, 4000);
+    play(h, 0, 300);
+    sceAudioOutClose(h);
+    sleep(1);
+  }
 
   say("Audio probe: open a game now. Tests start in 45 seconds.");
   sleep(45);
@@ -124,8 +163,7 @@ int main(void) {
         note("round %d method %d: skipped, no foreground user", round, m + 1);
         continue;
       }
-      h = me->sys ? sceAudioOutSysOpen(user, me->port, 0, GRAIN, RATE, FMT_S16_STEREO)
-                  : sceAudioOutOpen(user, me->port, 0, GRAIN, RATE, FMT_S16_STEREO);
+      h = open_method(me, fg);
       note("round %d method %d (%s): open user=%d -> 0x%08x", round, m + 1, me->name, user,
            (unsigned)h);
       if (h < 0) {
@@ -140,7 +178,11 @@ int main(void) {
         if (rc == 0) rc = play(h, 0, 220);
       }
       if (rc == 0) rc = play(h, 0, 500);
-      if (rc == 0) rc = play(h, 440, 6000);
+      if (rc == 0) {
+        char label[64];
+        snprintf(label, sizeof label, "round %d method %d", round, m + 1);
+        rc = timed_tone(h, label, 6000);
+      }
       if (rc == 0) rc = play(h, 0, 300);
       note("round %d method %d: output -> 0x%08x", round, m + 1, (unsigned)rc);
       note("round %d method %d: close -> 0x%08x", round, m + 1, (unsigned)sceAudioOutClose(h));
