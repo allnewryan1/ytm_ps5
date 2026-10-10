@@ -133,11 +133,15 @@ static int deploy(void) {
     return -1;
   }
   /* The loader reads exactly one ELF, sized from its headers, then starts it. */
+  /* The loader serves one connection at a time and stock elfldr waits forever on a client that
+   * goes quiet mid-send (ps5upload's elfldr_guard.rs), so never connect without sending, send
+   * in one go, and half-close at once: the end of stream is what tells some loaders to run it. */
   if (n < 64 || ytmd_send_all(fd, ytm_daemon_elf, n) != 0) {
     close(fd);
     snprintf(g_status, sizeof g_status, "Could not send the background player");
     return -1;
   }
+  shutdown(fd, SHUT_WR);
   close(fd);
   return 0;
 }

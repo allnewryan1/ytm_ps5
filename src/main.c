@@ -7,6 +7,7 @@
 #include <SDL.h>
 
 #include <ctype.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1816,6 +1817,8 @@ int main(int argc, char **argv) {
   char err[192];
   (void)argc;
   (void)argv;
+  /* A peer that went away (the daemon, YouTube) is an error return, not the end of the app. */
+  signal(SIGPIPE, SIG_IGN);
   printf("ytmusic: starting on PS5 userland\n");
   toast("YouTube Music");
 

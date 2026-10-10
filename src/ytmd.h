@@ -23,6 +23,9 @@
 #define YTMD_MAGIC 0x444d5459u /* "YTMD" */
 #define YTMD_VERSION 1
 #define YTMD_BODY_MAX 16384
+/* The daemon's thread name. Every thread it starts must name itself YTMD_THREAD_NAME or
+ * YTMD_THREAD_NAME "-<role>" (for example "ytmusicd-decode") as its first statement. */
+#define YTMD_THREAD_NAME "ytmusicd"
 
 enum {
   YTMD_HELLO = 1, /* YtmdHello -> YtmdHello */
