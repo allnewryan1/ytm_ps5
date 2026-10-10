@@ -70,7 +70,7 @@ NATIVE_STUBS := $(filter-out %/libkernel_sys.so %/libkernel_web.so %/libkernel_s
 NATIVE_LIBC := $(NATIVE_DIR)/libc-nodl.a
 NATIVE_COMPAT := $(NATIVE_DIR)/payload_compat.o
 
-.PHONY: all clean test package
+.PHONY: all clean test package probe
 
 all: $(ELF)
 
@@ -120,8 +120,14 @@ $(NATIVE_ELF): $(NATIVE_PIE) scripts/build-self-tool.sh
 		--heap-size 0x10000000 --file-name eboot.elf
 	python3 -c 'import sys; b=open("$(NATIVE_ELF)","rb").read(18); t=int.from_bytes(b[16:18],"little"); print("native eboot type", hex(t)); sys.exit(t!=0xfe10)'
 
+# Diagnostic: which audio path stays audible while a game has focus (tools/audioprobe.c).
+PROBE := ytm-audioprobe.elf
+probe: $(PROBE)
+$(PROBE): tools/audioprobe.c
+	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ $< -lSceAudioOut -lSceUserService -lkernel_sys -lm
+
 clean:
-	rm -f $(ELF)
+	rm -f $(ELF) $(PROBE)
 	rm -rf dist build/native
 
 test: $(ELF)

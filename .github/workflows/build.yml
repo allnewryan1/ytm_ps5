@@ -59,6 +59,7 @@ jobs:
           docker run --rm -v "$PWD:/workspace" -w /workspace "$IMAGE" bash -lc '
             set -eu
             make
+            make probe
             make package
             app=dist/PPSA99105
             file ytmusic.elf | grep -q "ELF 64-bit LSB.*x86-64" || { echo "not an x86-64 ELF"; exit 1; }
