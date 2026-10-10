@@ -24,14 +24,19 @@ int sceAudioOutInit(void);
 int sceAudioOutOpen(int user, int type, int index, unsigned len, unsigned freq, unsigned param);
 int sceAudioOutOutput(int handle, const void *buf);
 int sceAudioOutClose(int handle);
-int sceUserServiceGetForegroundUser(int *user);
-/* These take no arguments as far as anything public shows (shadPS4 stubs them without any).
- * Only the read-only queries and the media-playback pair are used, last. */
-int sceShellCoreUtilIsBgmPlaying(void);
-int sceSystemServiceIsBgmCpuBudgetAvailable(void);
-int sceSystemStateMgrEnterMediaPlaybackMode(void);
-int sceSystemStateMgrLeaveMediaPlaybackMode(void);
-int sceSystemStateMgrTickMusicPlayback(void);
+int sceKernelLoadStartModule(const char *name, unsigned long argc, const void *argv,
+                             unsigned int flags, const void *opt, int *res);
+int sceKernelDlsym(int handle, const char *symbol, void **addr);
+
+/* Looked up at run time, never imported: an import the app process does not get stays a NULL
+ * slot, and the first call jumps to 0 (the previous test crashed exactly so). These take no
+ * arguments as far as anything public shows (shadPS4 stubs them without any). */
+static int (*p_fg_user)(int *user);
+static int (*p_bgm_playing)(void);
+static int (*p_bgm_budget)(void);
+static int (*p_enter_media)(void);
+static int (*p_leave_media)(void);
+static int (*p_tick_music)(void);
 
 typedef struct {
   char unused[45];
@@ -89,6 +94,42 @@ static long long now_ms(void) {
   return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static int load_module(const char *soname) {
+  char full[96];
+  int res = 0, h;
+  snprintf(full, sizeof full, "/system/common/lib/%s", soname);
+  h = sceKernelLoadStartModule(full, 0, 0, 0, 0, &res);
+  if (h <= 0) h = sceKernelLoadStartModule(soname, 0, 0, 0, 0, &res);
+  if (h <= 0 && res > 0) h = res;
+  note("module %s -> %d (res 0x%08x)", soname, h, (unsigned)res);
+  return h;
+}
+
+static void *find(int h, const char *name, const char *nid) {
+  void *a = NULL;
+  if (h > 0 && (sceKernelDlsym(h, name, &a) != 0 || !a)) {
+    a = NULL;
+    if (sceKernelDlsym(h, nid, &a) != 0) a = NULL;
+  }
+  note("  %s: %s", name, a ? "found" : "missing");
+  sum("%s %s\n", a ? "+" : "-", name);
+  return a;
+}
+
+static void resolve(void) {
+  int us = load_module("libSceUserService.sprx");
+  int ss = load_module("libSceSystemService.sprx");
+  p_fg_user = (int (*)(int *))find(us, "sceUserServiceGetForegroundUser", "eNb53LQJmIM");
+  p_bgm_playing = (int (*)(void))find(ss, "sceShellCoreUtilIsBgmPlaying", "-Lpr5gHkHkc");
+  p_bgm_budget = (int (*)(void))find(ss, "sceSystemServiceIsBgmCpuBudgetAvailable", "1eoAje5ctyA");
+  p_enter_media = (int (*)(void))find(ss, "sceSystemStateMgrEnterMediaPlaybackMode", "Ap5dJ0zHRVY");
+  p_leave_media = (int (*)(void))find(ss, "sceSystemStateMgrLeaveMediaPlaybackMode", "88y5DztlXBE");
+  p_tick_music = (int (*)(void))find(ss, "sceSystemStateMgrTickMusicPlayback", "ypl-BoZZKOM");
+}
+
+static int bgm_playing(void) { return p_bgm_playing ? p_bgm_playing() : -1; }
+static int bgm_budget(void) { return p_bgm_budget ? p_bgm_budget() : -1; }
+
 static int play(int h, double hz, int ms, int tick) {
   static int16_t buf[GRAIN * 2];
   static double phase;
@@ -107,7 +148,7 @@ static int play(int h, double hz, int ms, int tick) {
     int rc = sceAudioOutOutput(h, buf);
     if (rc < 0) return rc;
     /* About once a second, the way a video player ticks to keep the console awake. */
-    if (tick && g % 187 == 0) sceSystemStateMgrTickMusicPlayback();
+    if (tick && p_tick_music && g % 187 == 0) p_tick_music();
   }
   return 0;
 }
@@ -133,8 +174,19 @@ static void run_one(int round, int m, int fg) {
   int user = me->fg_user ? fg : USER_SYSTEM;
   int h, rc = 0;
   long long t0;
+  if (me->fg_user && fg < 0) {
+    note("round %d method %d: skipped, no foreground user", round, m + 1);
+    sum("r%d m%d skip\n", round, m + 1);
+    return;
+  }
+  if (me->media_mode && (!p_enter_media || !p_leave_media)) {
+    note("round %d method %d: skipped, media playback mode not available", round, m + 1);
+    sum("r%d m%d skip\n", round, m + 1);
+    return;
+  }
+  note("round %d method %d: opening user=%d port=%d", round, m + 1, user, me->port);
   if (me->media_mode) {
-    rc = sceSystemStateMgrEnterMediaPlaybackMode();
+    rc = p_enter_media();
     note("round %d method %d: EnterMediaPlaybackMode -> 0x%08x", round, m + 1, (unsigned)rc);
   }
   h = sceAudioOutOpen(user, me->port, 0, GRAIN, RATE, FMT_S16_STEREO);
@@ -143,7 +195,7 @@ static void run_one(int round, int m, int fg) {
          (unsigned)h);
     sum("r%d m%d open %08x\n", round, m + 1, (unsigned)h);
     say("BG test %d of %d: %s. Open failed 0x%08x", m + 1, NMETHODS, me->name, (unsigned)h);
-    if (me->media_mode) sceSystemStateMgrLeaveMediaPlaybackMode();
+    if (me->media_mode) p_leave_media();
     sleep(3);
     return;
   }
@@ -158,13 +210,12 @@ static void run_one(int round, int m, int fg) {
   if (rc == 0) rc = play(h, 440, 6000, me->media_mode);
   note("round %d method %d (%s): 6000 ms tone took %lld ms, output 0x%08x; bgm playing %d, "
        "bgm budget %d",
-       round, m + 1, me->name, now_ms() - t0, (unsigned)rc, sceShellCoreUtilIsBgmPlaying(),
-       sceSystemServiceIsBgmCpuBudgetAvailable());
+       round, m + 1, me->name, now_ms() - t0, (unsigned)rc, bgm_playing(), bgm_budget());
   sum("r%d m%d %lldms%s\n", round, m + 1, now_ms() - t0, rc ? " err" : "");
   play(h, 0, 300, 0);
   sceAudioOutClose(h);
   if (me->media_mode) {
-    rc = sceSystemStateMgrLeaveMediaPlaybackMode();
+    rc = p_leave_media();
     note("round %d method %d: LeaveMediaPlaybackMode -> 0x%08x", round, m + 1, (unsigned)rc);
   }
   sleep(2);
@@ -172,16 +223,17 @@ static void run_one(int round, int m, int fg) {
 
 static void *probe_main(void *arg) {
   int fg = -1;
-  int rc;
+  int rc = -1;
   (void)arg;
   mkdir("/data/ytmusic", 0777);
   g_log = fopen("/data/ytmusic/bgprobe.log", "w");
   g_sum[0] = 0;
-  rc = sceUserServiceGetForegroundUser(&fg);
-  note("foreground user 0x%08x user=%d; AudioOutInit 0x%08x", (unsigned)rc, fg,
-       (unsigned)sceAudioOutInit());
-  note("before: bgm playing %d, bgm budget %d", sceShellCoreUtilIsBgmPlaying(),
-       sceSystemServiceIsBgmCpuBudgetAvailable());
+  note("bgprobe v2 started");
+  resolve();
+  if (p_fg_user) rc = p_fg_user(&fg);
+  note("foreground user 0x%08x user=%d", (unsigned)rc, fg);
+  note("AudioOutInit 0x%08x", (unsigned)sceAudioOutInit());
+  note("before: bgm playing %d, bgm budget %d", bgm_playing(), bgm_budget());
   say("Background audio test: press PS and go to the home screen now. Tones start in 15 seconds.");
   sleep(15);
   for (int round = 1; round <= 2; round++)
@@ -193,20 +245,16 @@ static void *probe_main(void *arg) {
   return NULL;
 }
 
+/* Created the way player.c creates its decoder thread, which is known to work here. */
 int bgprobe_start(void) {
   pthread_t t;
-  pthread_attr_t at;
   if (g_running) return -1;
   g_running = 1;
-  pthread_attr_init(&at);
-  pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-  pthread_attr_setstacksize(&at, 256 * 1024);
-  if (pthread_create(&t, &at, probe_main, NULL) != 0) {
+  if (pthread_create(&t, NULL, probe_main, NULL) != 0) {
     g_running = 0;
-    pthread_attr_destroy(&at);
     return -1;
   }
-  pthread_attr_destroy(&at);
+  pthread_detach(t);
   return 0;
 }
 
