@@ -24,13 +24,26 @@ int sceAudioOutInit(void);
 int sceAudioOutOpen(int user, int type, int index, unsigned len, unsigned freq, unsigned param);
 int sceAudioOutOutput(int handle, const void *buf);
 int sceAudioOutClose(int handle);
-int sceKernelLoadStartModule(const char *name, unsigned long argc, const void *argv,
-                             unsigned int flags, const void *opt, int *res);
-int sceKernelDlsym(int handle, const char *symbol, void **addr);
 
-/* Looked up at run time, never imported: an import the app process does not get stays a NULL
- * slot, and the first call jumps to 0 (the previous test crashed exactly so). These take no
- * arguments as far as anything public shows (shadPS4 stubs them without any). */
+/* Imported, but never called blind: an import the app process is not given stays a NULL GOT
+ * slot, and calling it jumps to 0 (the first test crashed exactly so). got() reads the slot
+ * itself, in asm so the compiler cannot assume a function's address is non-NULL.
+ * sceKernelDlsym is no help: in the app it finds nothing, not even functions SDL calls fine.
+ * The BGM calls take no arguments as far as anything public shows (shadPS4 stubs them so). */
+int sceUserServiceGetForegroundUser(int *user);
+int sceShellCoreUtilIsBgmPlaying(void);
+int sceSystemServiceIsBgmCpuBudgetAvailable(void);
+int sceSystemStateMgrEnterMediaPlaybackMode(void);
+int sceSystemStateMgrLeaveMediaPlaybackMode(void);
+int sceSystemStateMgrTickMusicPlayback(void);
+
+#define GOT(sym)                                                     \
+  ({                                                                 \
+    void *slot_;                                                     \
+    __asm__ volatile("movq " #sym "@GOTPCREL(%%rip), %0" : "=r"(slot_)); \
+    slot_;                                                           \
+  })
+
 static int (*p_fg_user)(int *user);
 static int (*p_bgm_playing)(void);
 static int (*p_bgm_budget)(void);
@@ -47,6 +60,8 @@ int sceKernelSendNotificationRequest(int, notify_request_t *, size_t, int);
 #define USER_SYSTEM 0xFF
 #define PORT_MAIN 0
 #define PORT_BGM 1
+#define PORT_VOICE 2
+#define PORT_PERSONAL 3
 #define FMT_S16_STEREO 1
 #define RATE 48000
 #define GRAIN 256
@@ -94,37 +109,25 @@ static long long now_ms(void) {
   return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static int load_module(const char *soname) {
-  char full[96];
-  int res = 0, h;
-  snprintf(full, sizeof full, "/system/common/lib/%s", soname);
-  h = sceKernelLoadStartModule(full, 0, 0, 0, 0, &res);
-  if (h <= 0) h = sceKernelLoadStartModule(soname, 0, 0, 0, 0, &res);
-  if (h <= 0 && res > 0) h = res;
-  note("module %s -> %d (res 0x%08x)", soname, h, (unsigned)res);
-  return h;
-}
-
-static void *find(int h, const char *name, const char *nid) {
-  void *a = NULL;
-  if (h > 0 && (sceKernelDlsym(h, name, &a) != 0 || !a)) {
-    a = NULL;
-    if (sceKernelDlsym(h, nid, &a) != 0) a = NULL;
-  }
-  note("  %s: %s", name, a ? "found" : "missing");
-  sum("%s %s\n", a ? "+" : "-", name);
-  return a;
+static void *check(const char *name, void *addr) {
+  note("  %s: %s (%p)", name, addr ? "bound" : "not given to the app", addr);
+  sum("%s %s\n", addr ? "+" : "-", name);
+  return addr;
 }
 
 static void resolve(void) {
-  int us = load_module("libSceUserService.sprx");
-  int ss = load_module("libSceSystemService.sprx");
-  p_fg_user = (int (*)(int *))find(us, "sceUserServiceGetForegroundUser", "eNb53LQJmIM");
-  p_bgm_playing = (int (*)(void))find(ss, "sceShellCoreUtilIsBgmPlaying", "-Lpr5gHkHkc");
-  p_bgm_budget = (int (*)(void))find(ss, "sceSystemServiceIsBgmCpuBudgetAvailable", "1eoAje5ctyA");
-  p_enter_media = (int (*)(void))find(ss, "sceSystemStateMgrEnterMediaPlaybackMode", "Ap5dJ0zHRVY");
-  p_leave_media = (int (*)(void))find(ss, "sceSystemStateMgrLeaveMediaPlaybackMode", "88y5DztlXBE");
-  p_tick_music = (int (*)(void))find(ss, "sceSystemStateMgrTickMusicPlayback", "ypl-BoZZKOM");
+  p_fg_user = (int (*)(int *))check("sceUserServiceGetForegroundUser",
+                                    GOT(sceUserServiceGetForegroundUser));
+  p_bgm_playing =
+      (int (*)(void))check("sceShellCoreUtilIsBgmPlaying", GOT(sceShellCoreUtilIsBgmPlaying));
+  p_bgm_budget = (int (*)(void))check("sceSystemServiceIsBgmCpuBudgetAvailable",
+                                      GOT(sceSystemServiceIsBgmCpuBudgetAvailable));
+  p_enter_media = (int (*)(void))check("sceSystemStateMgrEnterMediaPlaybackMode",
+                                       GOT(sceSystemStateMgrEnterMediaPlaybackMode));
+  p_leave_media = (int (*)(void))check("sceSystemStateMgrLeaveMediaPlaybackMode",
+                                       GOT(sceSystemStateMgrLeaveMediaPlaybackMode));
+  p_tick_music = (int (*)(void))check("sceSystemStateMgrTickMusicPlayback",
+                                      GOT(sceSystemStateMgrTickMusicPlayback));
 }
 
 static int bgm_playing(void) { return p_bgm_playing ? p_bgm_playing() : -1; }
@@ -166,6 +169,8 @@ static const Method methods[] = {
     {"MAIN port, your user", 1, PORT_MAIN, 0},
     {"BGM port, your user", 1, PORT_BGM, 0},
     {"BGM port, your user, media playback mode", 1, PORT_BGM, 1},
+    {"VOICE port, your user", 1, PORT_VOICE, 0},
+    {"PERSONAL port, your user", 1, PORT_PERSONAL, 0},
 };
 #define NMETHODS (int)(sizeof methods / sizeof methods[0])
 
@@ -228,11 +233,11 @@ static void *probe_main(void *arg) {
   mkdir("/data/ytmusic", 0777);
   g_log = fopen("/data/ytmusic/bgprobe.log", "w");
   g_sum[0] = 0;
-  note("bgprobe v2 started");
+  note("bgprobe v3 started");
   resolve();
   if (p_fg_user) rc = p_fg_user(&fg);
   note("foreground user 0x%08x user=%d", (unsigned)rc, fg);
-  note("AudioOutInit 0x%08x", (unsigned)sceAudioOutInit());
+  note("AudioOutInit 0x%08x (0x8026000e: SDL already did)", (unsigned)sceAudioOutInit());
   note("before: bgm playing %d, bgm budget %d", bgm_playing(), bgm_budget());
   say("Background audio test: press PS and go to the home screen now. Tones start in 15 seconds.");
   sleep(15);
