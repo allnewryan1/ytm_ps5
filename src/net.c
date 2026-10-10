@@ -414,6 +414,19 @@ static const char *json_end(const char *p) {
   return p;
 }
 
+/* The object that follows key (a pointer into the JSON at or after the key), clamped to
+ * lim. NULL when there is none before lim. *oend is one past its closing brace. */
+static const char *sub_obj(const char *key, const char *lim, const char **oend) {
+  const char *obj;
+  const char *e;
+  if (!key || key >= lim) return NULL;
+  obj = strchr(key, '{');
+  if (!obj || obj >= lim) return NULL;
+  e = json_end(obj);
+  *oend = e > lim ? lim : e;
+  return obj;
+}
+
 static int is_sep(const char *s) {
   const unsigned char *p = (const unsigned char *)s;
   int marks = 0;
@@ -641,6 +654,19 @@ static int walk_kind(const char *json, const char *marker, Track *out, int *coun
   return *count;
 }
 
+/* Radio mixes (RD…) are not a stable shelf. Real playlists browse as VL + id. */
+static void store_playlist(Track *t, const char *pid) {
+  if (!pid || !pid[0] || strncmp(pid, "RD", 2) == 0) return;
+  if ((int)strlen(pid) + 3 >= YTM_BROWSE_LEN) return;
+  if (strncmp(pid, "VL", 2) == 0) {
+    memcpy(t->browse, pid, strlen(pid) + 1);
+    return;
+  }
+  t->browse[0] = 'V';
+  t->browse[1] = 'L';
+  memcpy(t->browse + 2, pid, strlen(pid) + 1);
+}
+
 static void parse_mrlir(const char *s, const char *end, Track *t) {
   const char *menu = find_bounded(s, end, "\"menu\":");
   const char *lim = menu ? menu : end;
@@ -657,20 +683,11 @@ static void parse_mrlir(const char *s, const char *end, Track *t) {
   if (!vid) vid = find_bounded(s, lim, "\"videoId\":\"");
   if (!vid || !take_vid(vid + 11, lim, t->id)) {
     const char *pl = find_bounded(s, lim, "\"playlistId\":\"");
-    char pid[64];
+    char list_id[64];
     t->id[0] = 0;
-    pid[0] = 0;
-    if (pl) copy_json_str(pl + 14, pid, (int)sizeof pid);
-    /* Radio mixes (RD…) are not a stable shelf. Real playlists browse as VL + id. */
-    if (pid[0] && strncmp(pid, "RD", 2) != 0 && (int)strlen(pid) + 3 < YTM_BROWSE_LEN) {
-      if (strncmp(pid, "VL", 2) == 0)
-        memcpy(t->browse, pid, strlen(pid) + 1);
-      else {
-        t->browse[0] = 'V';
-        t->browse[1] = 'L';
-        memcpy(t->browse + 2, pid, strlen(pid) + 1);
-      }
-    }
+    list_id[0] = 0;
+    if (pl) copy_json_str(pl + 14, list_id, (int)sizeof list_id);
+    store_playlist(t, list_id);
     if (!t->browse[0]) return;
   }
   fc = find_bounded(s, lim, "\"flexColumns\":");
@@ -702,13 +719,9 @@ static void parse_mrlir(const char *s, const char *end, Track *t) {
     }
   }
   {
-    const char *th = find_bounded(s, end, "\"musicThumbnailRenderer\":");
-    if (th) {
-      const char *obj = strchr(th, '{');
-      const char *tend = obj ? json_end(obj) : end;
-      if (tend > end) tend = end;
-      if (obj) take_thumb(obj, tend, t);
-    }
+    const char *te;
+    const char *th = sub_obj(find_bounded(s, end, "\"musicThumbnailRenderer\":"), end, &te);
+    if (th) take_thumb(th, te, t);
   }
   if (t->id[0]) note_kind(s, end, t);
   note_browse_ids(s, end, t);
@@ -732,13 +745,9 @@ static void parse_card(const char *s, const char *end, Track *t) {
     if (obj) runs_into(obj, send, t, 0);
   }
   {
-    const char *th = find_bounded(s, end, "\"thumbnail\":");
-    if (th) {
-      const char *obj = strchr(th, '{');
-      const char *tend = obj ? json_end(obj) : end;
-      if (tend > end) tend = end;
-      if (obj) take_thumb(obj, tend, t);
-    }
+    const char *te;
+    const char *th = sub_obj(find_bounded(s, end, "\"thumbnail\":"), end, &te);
+    if (th) take_thumb(th, te, t);
   }
   note_kind(s, end, t);
   note_browse_ids(s, end, t);
@@ -832,18 +841,6 @@ static int nav_page(const char *s, const char *end, const char *type) {
   lim = json_end(obj);
   if (lim > end) lim = end;
   return page_is(obj, lim, type);
-}
-
-static void store_playlist(Track *t, const char *pid) {
-  if (!pid || !pid[0] || strncmp(pid, "RD", 2) == 0) return;
-  if ((int)strlen(pid) + 3 >= YTM_BROWSE_LEN) return;
-  if (strncmp(pid, "VL", 2) == 0) {
-    memcpy(t->browse, pid, strlen(pid) + 1);
-    return;
-  }
-  t->browse[0] = 'V';
-  t->browse[1] = 'L';
-  memcpy(t->browse + 2, pid, strlen(pid) + 1);
 }
 
 static void parse_two(const char *s, const char *end, Track *t) {
@@ -1251,6 +1248,7 @@ void ytm_set_token_custom(int on) { g_token_custom = on ? 1 : 0; }
 static void form_put(char *dst, int n, const char *key, const char *val) {
   static const char *hex = "0123456789ABCDEF";
   int o = (int)strlen(dst);
+  if (o >= n) return;
   if (o > 0 && o + 1 < n) dst[o++] = '&';
   while (*key && o + 1 < n) dst[o++] = *key++;
   if (o + 1 < n) dst[o++] = '=';
@@ -1929,40 +1927,24 @@ static void parse_panel(const char *s, const char *end, Track *t) {
     t->id[0] = 0;
     return;
   }
-  k = top_key(s, end, "\"title\"");
-  if (k && (obj = strchr(k, '{')) != NULL && obj < end) {
-    oend = json_end(obj);
-    runs_into(obj, oend > end ? end : oend, t, 1);
-  }
-  k = top_key(s, end, "\"longBylineText\"");
-  if (k && (obj = strchr(k, '{')) != NULL && obj < end) {
-    oend = json_end(obj);
-    if (oend > end) oend = end;
+  if ((obj = sub_obj(top_key(s, end, "\"title\""), end, &oend)) != NULL)
+    runs_into(obj, oend, t, 1);
+  if ((obj = sub_obj(top_key(s, end, "\"longBylineText\""), end, &oend)) != NULL) {
     runs_into(obj, oend, t, 0);
     note_browse_ids(obj, oend, t);
   }
-  k = top_key(s, end, "\"lengthText\"");
-  if (k && (obj = strchr(k, '{')) != NULL && obj < end) {
-    const char *tx;
-    oend = json_end(obj);
-    if (oend > end) oend = end;
-    tx = find_bounded(obj, oend, "\"text\":\"");
+  if ((obj = sub_obj(top_key(s, end, "\"lengthText\""), end, &oend)) != NULL) {
+    const char *tx = find_bounded(obj, oend, "\"text\":\"");
     if (tx) {
       char tmp[32];
       copy_json_str(tx + 8, tmp, (int)sizeof tmp);
       if (clock_seconds(tmp) >= 0) t->seconds = clock_seconds(tmp);
     }
   }
-  k = top_key(s, end, "\"thumbnail\"");
-  if (k && (obj = strchr(k, '{')) != NULL && obj < end) {
-    oend = json_end(obj);
-    take_thumb(obj, oend > end ? end : oend, t);
-  }
-  k = top_key(s, end, "\"navigationEndpoint\"");
-  if (k && (obj = strchr(k, '{')) != NULL && obj < end) {
-    oend = json_end(obj);
-    note_kind(obj, oend > end ? end : oend, t);
-  }
+  if ((obj = sub_obj(top_key(s, end, "\"thumbnail\""), end, &oend)) != NULL)
+    take_thumb(obj, oend, t);
+  if ((obj = sub_obj(top_key(s, end, "\"navigationEndpoint\""), end, &oend)) != NULL)
+    note_kind(obj, oend, t);
 }
 
 static int collect_panel(const char *json, Track *out, int max) {
@@ -2039,61 +2021,6 @@ int ytm_radio(const char *video_id, Track *out, int max, char *err, int err_n) {
   if (n == 0) snprintf(err, (size_t)err_n, "No mix for that song");
   else err[0] = 0;
   return n;
-}
-
-#define PRE_SLOTS 4
-typedef struct {
-  char id[YTM_ID_LEN];
-  char url[4096];
-  int duration;
-  int ready;
-} PreSlot;
-static PreSlot g_pre[PRE_SLOTS];
-static int g_pre_next;
-
-static PreSlot *pre_find(const char *id) {
-  int i;
-  if (!id || !id[0]) return NULL;
-  for (i = 0; i < PRE_SLOTS; i++) {
-    if (g_pre[i].id[0] && strcmp(g_pre[i].id, id) == 0) return &g_pre[i];
-  }
-  return NULL;
-}
-
-int ytm_prefetch_audio(const char *video_id) {
-  PreSlot *slot;
-  char err[192];
-  char url[4096];
-  int dur = 0;
-  if (!video_id || !video_id[0]) return -1;
-  slot = pre_find(video_id);
-  if (slot && slot->ready) return 0;
-  if (!slot) {
-    slot = &g_pre[g_pre_next++ % PRE_SLOTS];
-    slot->id[0] = 0;
-    slot->ready = 0;
-  }
-  if (ytm_audio_url(video_id, url, (int)sizeof url, &dur, err, (int)sizeof err) != 0) return -1;
-  snprintf(slot->id, sizeof slot->id, "%s", video_id);
-  snprintf(slot->url, sizeof slot->url, "%s", url);
-  slot->duration = dur;
-  slot->ready = 1;
-  return 0;
-}
-
-const char *ytm_prefetch_url(const char *video_id, int *duration) {
-  PreSlot *slot = pre_find(video_id);
-  if (!slot || !slot->ready) return NULL;
-  if (duration && slot->duration > 0) *duration = slot->duration;
-  return slot->url;
-}
-
-void ytm_prefetch_drop(const char *video_id) {
-  PreSlot *slot = pre_find(video_id);
-  if (!slot) return;
-  slot->id[0] = 0;
-  slot->ready = 0;
-  slot->url[0] = 0;
 }
 
 static int http_get_hdr(const char *url, unsigned char *buf, int cap, int *status, const char *ua,

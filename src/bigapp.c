@@ -147,27 +147,32 @@ static int heap_map(size_t bytes) {
   return 0;
 }
 
+/* 0 unmapped, 1 mapping, 2 ready, 3 failed. Every read is an atomic load: a plain read in
+ * the wait loop below can be hoisted out of it, and the waiting thread then never sees the
+ * first thread finish. */
 static int heap_ready(void) {
   static const size_t sizes[] = {128ul << 20, 64ul << 20, 32ul << 20};
+  int state = __atomic_load_n(&g_heap_state, __ATOMIC_ACQUIRE);
   int i;
-  if (g_heap_state == 2) return 0;
-  if (g_heap_state == 3) return -1;
+  if (state == 2) return 0;
+  if (state == 3) return -1;
   if (!__sync_bool_compare_and_swap(&g_heap_state, 0, 1)) {
-    while (g_heap_state == 1) {
-    }
-    return g_heap_state == 2 ? 0 : -1;
+    while ((state = __atomic_load_n(&g_heap_state, __ATOMIC_ACQUIRE)) == 1) sceKernelUsleep(100);
+    return state == 2 ? 0 : -1;
   }
   for (i = 0; i < 3; i++) {
     if (heap_map(sizes[i]) == 0) {
-      g_heap_state = 2;
+      __atomic_store_n(&g_heap_state, 2, __ATOMIC_RELEASE);
       return 0;
     }
   }
-  g_heap_state = 3;
+  __atomic_store_n(&g_heap_state, 3, __ATOMIC_RELEASE);
   return -1;
 }
 
+/* Rounded block size, or 0 when n is too large to round without wrapping. */
 static size_t heap_need(size_t n) {
+  if (n > ((size_t)-1 >> 1)) return 0;
   if (n < 64) n = 64;
   return (n + 63u) & ~(size_t)63u;
 }
@@ -175,6 +180,7 @@ static size_t heap_need(size_t n) {
 static void *heap_take(size_t n) {
   HeapBlk *blk;
   n = heap_need(n);
+  if (n == 0) return 0;
   for (blk = g_heap; blk; blk = blk->next) {
     if (!blk->free || blk->size < n) continue;
     if (blk->size >= n + sizeof(HeapBlk) + 32) {

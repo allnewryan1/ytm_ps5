@@ -6,9 +6,7 @@ void player_close(void);
 
 /* Stop anything currently decoding and start this URL. 0 on spawn. */
 int player_start(const char *url, int duration_s);
-/* Same, but the bytes stay in memory. Takes ownership of data. */
-int player_start_mem(unsigned char *data, int n, int duration_s);
-/* Replay the current song from the start. 0 if something was playing. */
+/* Replay the current song from the start (repeat one). 0 if something was playing. */
 int player_replay(void);
 void player_stop(void);
 void player_toggle(void);

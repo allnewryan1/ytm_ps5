@@ -64,9 +64,5 @@ int ytm_stream_follow(char *url, int url_n);
 int ytm_cover_fetch(const Track *t, int side);
 const unsigned char *ytm_cover_pixels(const Track *t, int side, int *w, int *h);
 
-/* Resolve the next track's audio URL and keep it until play. */
-int ytm_prefetch_audio(const char *video_id);
-const char *ytm_prefetch_url(const char *video_id, int *duration);
-void ytm_prefetch_drop(const char *video_id);
 
 #endif

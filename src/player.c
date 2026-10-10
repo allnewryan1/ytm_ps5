@@ -115,10 +115,6 @@ static int ring_write(const int16_t *pcm, int frames) {
   }
   return 0;
 }
-static unsigned char *g_owned;
-static unsigned char *g_audio;
-static int g_audio_n;
-static int g_audio_off;
 
 static int interrupt_cb(void *opaque) {
   (void)opaque;
@@ -152,27 +148,6 @@ int player_open(char *err, int err_n) {
   return 0;
 }
 
-static int mem_read(void *opaque, uint8_t *buf, int buf_size) {
-  (void)opaque;
-  if (g_audio_off >= g_audio_n) return AVERROR_EOF;
-  if (buf_size > g_audio_n - g_audio_off) buf_size = g_audio_n - g_audio_off;
-  memcpy(buf, g_audio + g_audio_off, (size_t)buf_size);
-  g_audio_off += buf_size;
-  return buf_size;
-}
-
-static int64_t mem_seek(void *opaque, int64_t off, int whence) {
-  (void)opaque;
-  if (whence & AVSEEK_SIZE) return g_audio_n;
-  whence &= ~AVSEEK_FORCE;
-  if (whence == SEEK_SET) g_audio_off = (int)off;
-  else if (whence == SEEK_CUR) g_audio_off += (int)off;
-  else if (whence == SEEK_END) g_audio_off = g_audio_n + (int)off;
-  else return -1;
-  if (g_audio_off < 0 || g_audio_off > g_audio_n) return -1;
-  return g_audio_off;
-}
-
 /* Resample one frame (NULL flushes the resampler) to stereo S16 and hand it to the ring. */
 static void emit_frame(SwrContext *swr, AVFrame *frame) {
   int in = frame ? frame->nb_samples : 0;
@@ -188,6 +163,70 @@ static void emit_frame(SwrContext *swr, AVFrame *frame) {
   av_freep(&out);
 }
 
+static int has_err(void) {
+  int on;
+  pthread_mutex_lock(&g_mu);
+  on = g_err[0] != 0;
+  pthread_mutex_unlock(&g_mu);
+  return on;
+}
+
+/* Take a pending seek request. 1 and *to when there is one. */
+static int take_seek(double *to) {
+  int on;
+  pthread_mutex_lock(&g_mu);
+  on = g_seek_req;
+  *to = g_seek_to;
+  g_seek_req = 0;
+  pthread_mutex_unlock(&g_mu);
+  return on;
+}
+
+static int seek_pending(void) {
+  int on;
+  pthread_mutex_lock(&g_mu);
+  on = g_seek_req;
+  pthread_mutex_unlock(&g_mu);
+  return on;
+}
+
+static void drain_decoder(AVCodecContext *dec, SwrContext *swr, AVFrame *frame) {
+  if (avcodec_send_packet(dec, NULL) == 0) {
+    while (avcodec_receive_frame(dec, frame) == 0) {
+      emit_frame(swr, frame);
+      av_frame_unref(frame);
+    }
+  }
+  emit_frame(swr, NULL);
+}
+
+static AVFormatContext *open_stream(const char *url, const char *ua, const char *ref) {
+  AVFormatContext *fmt = avformat_alloc_context();
+  AVDictionary *opts = NULL;
+  if (!fmt) {
+    set_err("Decoder ran out of memory");
+    return NULL;
+  }
+  fmt->interrupt_callback.callback = interrupt_cb;
+  fmt->interrupt_callback.opaque = NULL;
+  av_dict_set(&opts, "user_agent", ua[0] ? ua : ytm_stream_ua(), 0);
+  av_dict_set(&opts, "referer", ref[0] ? ref : ytm_stream_referer(), 0);
+  av_dict_set(&opts, "headers", "Origin: https://www.youtube.com\r\n", 0);
+  /* Seekable (the default) lets the HTTP layer resume a dropped connection with a Range
+   * request at the byte it stopped. With seekable 0 a drop near the end was read as the
+   * end of the file, and the song was cut short. */
+  av_dict_set(&opts, "multiple_requests", "1", 0);
+  av_dict_set(&opts, "reconnect", "1", 0);
+  av_dict_set(&opts, "reconnect_streamed", "1", 0);
+  av_dict_set(&opts, "reconnect_on_network_error", "1", 0);
+  av_dict_set(&opts, "reconnect_delay_max", "4", 0);
+  av_dict_set(&opts, "rw_timeout", "15000000", 0);
+  /* On failure avformat_open_input frees fmt and sets it to NULL. */
+  if (avformat_open_input(&fmt, url, NULL, &opts) < 0) set_err("Could not open the audio stream");
+  av_dict_free(&opts);
+  return fmt;
+}
+
 static void *decode_main(void *arg) {
   AVFormatContext *fmt = NULL;
   AVCodecContext *dec = NULL;
@@ -195,84 +234,29 @@ static void *decode_main(void *arg) {
   AVPacket *pkt = NULL;
   SwrContext *swr = NULL;
   const AVCodec *codec = NULL;
-  AVDictionary *opts = NULL;
-  AVIOContext *avio = NULL;
-  int custom = 0;
   int si;
   char url[8192];
   char ua[200];
   char ref[120];
-  int use_mem;
   (void)arg;
 
   pthread_mutex_lock(&g_mu);
   snprintf(url, sizeof url, "%s", g_url);
   snprintf(ua, sizeof ua, "%s", g_ua);
   snprintf(ref, sizeof ref, "%s", g_ref);
-  use_mem = g_audio != NULL && g_audio_n > 32;
   pthread_mutex_unlock(&g_mu);
 
-  fmt = avformat_alloc_context();
-  if (!fmt) {
-    set_err("Decoder ran out of memory");
-    goto done;
-  }
-  fmt->interrupt_callback.callback = interrupt_cb;
-  fmt->interrupt_callback.opaque = NULL;
-
-  if (use_mem) {
-    unsigned char *ab = av_malloc(8192);
-    if (!ab) {
-      set_err("Decoder ran out of memory");
-      goto done;
-    }
-    g_audio_off = 0;
-    avio = avio_alloc_context(ab, 8192, 0, NULL, mem_read, NULL, mem_seek);
-    if (!avio) {
-      av_free(ab);
-      set_err("Decoder ran out of memory");
-      goto done;
-    }
-    fmt->pb = avio;
-    fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-    custom = 1;
-    if (avformat_open_input(&fmt, NULL, NULL, NULL) < 0) {
-      set_err("Could not open the audio stream");
-      goto done;
-    }
-  } else {
-    av_dict_set(&opts, "user_agent", ua[0] ? ua : ytm_stream_ua(), 0);
-    av_dict_set(&opts, "referer", ref[0] ? ref : ytm_stream_referer(), 0);
-    av_dict_set(&opts, "headers", "Origin: https://www.youtube.com\r\n", 0);
-    /* Seekable lets the HTTP layer resume a dropped connection with a Range request at
-     * the byte it stopped. With seekable 0 a drop near the end was read as end of file,
-     * and the song was cut short. */
-    av_dict_set(&opts, "multiple_requests", "1", 0);
-    av_dict_set(&opts, "reconnect", "1", 0);
-    av_dict_set(&opts, "reconnect_streamed", "1", 0);
-    av_dict_set(&opts, "reconnect_on_network_error", "1", 0);
-    av_dict_set(&opts, "reconnect_delay_max", "4", 0);
-    av_dict_set(&opts, "rw_timeout", "15000000", 0);
-    if (avformat_open_input(&fmt, url, NULL, &opts) < 0) {
-      set_err("Could not open the audio stream");
-      av_dict_free(&opts);
-      goto done;
-    }
-    av_dict_free(&opts);
-    opts = NULL;
-  }
-
+  fmt = open_stream(url, ua, ref);
+  if (!fmt) goto done;
   if (avformat_find_stream_info(fmt, NULL) < 0) {
     set_err("Could not read stream info");
     goto done;
   }
-
   si = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
   if (si < 0 || !codec) {
     set_err("No audio track in that stream");
     goto done;
   }
-
   dec = avcodec_alloc_context3(codec);
   if (!dec || avcodec_parameters_to_context(dec, fmt->streams[si]->codecpar) < 0 ||
       avcodec_open2(dec, codec, NULL) < 0) {
@@ -287,26 +271,24 @@ static void *decode_main(void *arg) {
     set_err("Audio sample rate is missing");
     goto done;
   }
-
   {
     AVChannelLayout dst;
+    int bad;
     av_channel_layout_default(&dst, 2);
-    if (swr_alloc_set_opts2(&swr, &dst, AV_SAMPLE_FMT_S16, 48000, &dec->ch_layout,
-                            dec->sample_fmt, dec->sample_rate, 0, NULL) < 0 ||
-        !swr || swr_init(swr) < 0) {
-      av_channel_layout_uninit(&dst);
+    bad = swr_alloc_set_opts2(&swr, &dst, AV_SAMPLE_FMT_S16, OUT_RATE, &dec->ch_layout,
+                              dec->sample_fmt, dec->sample_rate, 0, NULL) < 0 ||
+          !swr || swr_init(swr) < 0;
+    av_channel_layout_uninit(&dst);
+    if (bad) {
       set_err("Could not set up the resampler");
       goto done;
     }
-    av_channel_layout_uninit(&dst);
   }
-
   if (fmt->duration > 0) {
     pthread_mutex_lock(&g_mu);
     g_duration_hint = (int)(fmt->duration / AV_TIME_BASE);
     pthread_mutex_unlock(&g_mu);
   }
-
   frame = av_frame_alloc();
   pkt = av_packet_alloc();
   if (!frame || !pkt) {
@@ -317,56 +299,64 @@ static void *decode_main(void *arg) {
   {
     int64_t last_pts = AV_NOPTS_VALUE;
     int retries = 0;
-    int drained = 0;
+    int at_end = 0;
     while (!atomic_load(&g_stop)) {
-      int seek = 0;
       double seek_to = 0;
       int rc;
-      pthread_mutex_lock(&g_mu);
-      if (g_seek_req) {
-        seek = 1;
-        seek_to = g_seek_to;
-        g_seek_req = 0;
-      }
-      pthread_mutex_unlock(&g_mu);
-      if (seek) {
+      if (take_seek(&seek_to)) {
         int64_t ts = (int64_t)(seek_to * AV_TIME_BASE);
         if (ts < 0) ts = 0;
-        av_seek_frame(fmt, -1, ts, AVSEEK_FLAG_BACKWARD);
-        avcodec_flush_buffers(dec);
-        swr_convert(swr, NULL, 0, NULL, 0);
-        ring_reset((uint64_t)(seek_to * OUT_RATE));
-        last_pts = AV_NOPTS_VALUE;
+        if (av_seek_frame(fmt, -1, ts, AVSEEK_FLAG_BACKWARD) >= 0) {
+          avcodec_flush_buffers(dec);
+          swr_convert(swr, NULL, 0, NULL, 0);
+          ring_reset((uint64_t)(seek_to * OUT_RATE));
+          last_pts = AV_NOPTS_VALUE;
+          at_end = 0;
+          atomic_store(&g_eof, 0);
+        } else if (at_end) {
+          /* Past the end the only way on is a rewind. Report it, or repeat one would spin. */
+          set_err("Could not rewind this song");
+          break;
+        }
       }
-
+      if (at_end) {
+        usleep(20000);
+        continue;
+      }
       if (atomic_load(&g_paused) || ring_fill() >= AHEAD_FRAMES) {
         usleep(10000);
         continue;
       }
-
       rc = av_read_frame(fmt, pkt);
       if (rc < 0) {
+        int early = rc != AVERROR_EOF && !avio_feof(fmt->pb);
         /* A network error before the end: resume at the last packet instead of skipping. */
-        if (rc != AVERROR_EOF && !avio_feof(fmt->pb) && retries < 3 && last_pts != AV_NOPTS_VALUE &&
-            !atomic_load(&g_stop)) {
+        if (early && retries < 3 && last_pts != AV_NOPTS_VALUE && !atomic_load(&g_stop)) {
           retries++;
           if (av_seek_frame(fmt, si, last_pts, AVSEEK_FLAG_BACKWARD) >= 0) continue;
         }
-        if (rc != AVERROR_EOF && !avio_feof(fmt->pb) && !atomic_load(&g_stop)) {
+        if (early && !atomic_load(&g_stop)) {
           char e[96];
           av_strerror(rc, e, sizeof e);
           fprintf(stderr, "ytmusic: stream read failed: %s\n", e);
         }
-        drained = 1;
-        break;
+        if (atomic_load(&g_stop)) break;
+        /* End of file: the decoder and resampler still hold the last few frames. */
+        drain_decoder(dec, swr, frame);
+        /* A seek that arrived during those last frames rewinds instead of ending. */
+        if (seek_pending()) continue;
+        /* Stay open until the song is replaced, so a late seek or repeat one still works. */
+        at_end = 1;
+        atomic_store(&g_eof, 1);
+        continue;
       }
       if (pkt->stream_index != si) {
         av_packet_unref(pkt);
         continue;
       }
       /* After a resume, skip packets already played. */
-      if (last_pts != AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE && pkt->pts <= last_pts &&
-          retries > 0) {
+      if (retries > 0 && last_pts != AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE &&
+          pkt->pts <= last_pts) {
         av_packet_unref(pkt);
         continue;
       }
@@ -379,57 +369,21 @@ static void *decode_main(void *arg) {
       }
       av_packet_unref(pkt);
     }
-    if (drained && !atomic_load(&g_stop)) {
-      /* End of file: the decoder and resampler still hold the last few frames. */
-      if (avcodec_send_packet(dec, NULL) == 0) {
-        while (avcodec_receive_frame(dec, frame) == 0) {
-          emit_frame(swr, frame);
-          av_frame_unref(frame);
-        }
-      }
-      emit_frame(swr, NULL);
-      if (!atomic_load(&g_stop)) atomic_store(&g_eof, 1);
-    }
   }
 
 done:
-  if (!atomic_load(&g_stop) && player_error()[0]) atomic_store(&g_eof, 1);
+  /* An open or decode failure ends the song so the app can move on. */
+  if (!atomic_load(&g_stop) && has_err()) atomic_store(&g_eof, 1);
   if (swr) swr_free(&swr);
   if (pkt) av_packet_free(&pkt);
   if (frame) av_frame_free(&frame);
   if (dec) avcodec_free_context(&dec);
-  if (fmt) {
-    AVIOContext *pb = custom ? fmt->pb : NULL;
-    if (custom) fmt->pb = NULL;
-    avformat_close_input(&fmt);
-    if (pb) {
-      av_freep(&pb->buffer);
-      avio_context_free(&pb);
-    }
-  } else if (avio) {
-    av_freep(&avio->buffer);
-    avio_context_free(&avio);
-  }
-  if (opts) av_dict_free(&opts);
+  if (fmt) avformat_close_input(&fmt);
   return NULL;
-}
-
-static void remember_headers(void) {
-  snprintf(g_ua, sizeof g_ua, "%s", ytm_stream_ua());
-  snprintf(g_ref, sizeof g_ref, "%s", ytm_stream_referer());
-}
-
-static void drop_audio(void) {
-  free(g_owned);
-  g_owned = NULL;
-  g_audio = NULL;
-  g_audio_n = 0;
-  g_audio_off = 0;
 }
 
 int player_start(const char *url, int duration_s) {
   player_stop();
-  drop_audio();
   if (!url || !url[0]) {
     set_err("Missing audio URL");
     return -1;
@@ -439,11 +393,10 @@ int player_start(const char *url, int duration_s) {
     return -1;
   }
   pthread_mutex_lock(&g_mu);
-  snprintf(g_url, sizeof g_url, "%s", url);
-  remember_headers();
+  if (url != g_url) snprintf(g_url, sizeof g_url, "%s", url);
+  snprintf(g_ua, sizeof g_ua, "%s", ytm_stream_ua());
+  snprintf(g_ref, sizeof g_ref, "%s", ytm_stream_referer());
   g_err[0] = 0;
-  g_stop = 0;
-  g_paused = 0;
   g_seek_req = 0;
   g_duration_hint = duration_s > 0 ? duration_s : 0;
   pthread_mutex_unlock(&g_mu);
@@ -461,65 +414,18 @@ int player_start(const char *url, int duration_s) {
   return 0;
 }
 
-int player_start_mem(unsigned char *data, int n, int duration_s) {
-  player_stop();
-  drop_audio();
-  if (!data || n < 32) {
-    free(data);
-    set_err("Missing audio");
-    return -1;
-  }
-  if (g_dev == 0) {
-    free(data);
-    set_err("Audio output is not open");
-    return -1;
-  }
-  g_owned = data;
-  g_audio = data;
-  g_audio_n = n;
-  g_audio_off = 0;
-  pthread_mutex_lock(&g_mu);
-  g_url[0] = 0;
-  remember_headers();
-  g_err[0] = 0;
-  g_stop = 0;
-  g_paused = 0;
-  g_seek_req = 0;
-  g_duration_hint = duration_s > 0 ? duration_s : 0;
-  pthread_mutex_unlock(&g_mu);
-  atomic_store(&g_eof, 0);
-  atomic_store(&g_stop, 0);
-  atomic_store(&g_paused, 0);
-  g_drained_at = 0;
-  ring_reset(0);
-  SDL_PauseAudioDevice(g_dev, 0);
-  if (pthread_create(&g_thread, NULL, decode_main, NULL) != 0) {
-    set_err("Could not start the decoder thread");
-    return -1;
-  }
-  g_thread_live = 1;
-  return 0;
-}
-
+/* Repeat one: a seek to 0 on the open stream, so the URL is not fetched again. */
 int player_replay(void) {
-  unsigned char *keep;
-  int n;
-  int dur;
-  char url[8192];
-  if (g_owned && g_audio_n > 32) {
-    keep = g_owned;
-    n = g_audio_n;
-    dur = g_duration_hint;
-    g_owned = NULL;
-    g_audio = NULL;
-    return player_start_mem(keep, n, dur);
+  if (g_thread_live) {
+    player_ack_ended();
+    pthread_mutex_lock(&g_mu);
+    g_seek_to = 0;
+    g_seek_req = 1;
+    pthread_mutex_unlock(&g_mu);
+    return 0;
   }
-  pthread_mutex_lock(&g_mu);
-  snprintf(url, sizeof url, "%s", g_url);
-  dur = g_duration_hint;
-  pthread_mutex_unlock(&g_mu);
-  if (!url[0]) return -1;
-  return player_start(url, dur);
+  if (!g_url[0]) return -1;
+  return player_start(g_url, (int)player_duration());
 }
 
 void player_stop(void) {
@@ -533,7 +439,6 @@ void player_stop(void) {
 
 void player_close(void) {
   player_stop();
-  drop_audio();
   if (g_dev) {
     SDL_CloseAudioDevice(g_dev);
     g_dev = 0;
@@ -576,11 +481,10 @@ int player_paused(void) { return atomic_load(&g_paused); }
  * Moving on as soon as the read finished cleared about a second of the song's tail. */
 int player_ended(void) {
   if (!atomic_load(&g_eof)) return 0;
-  if (ring_fill() > 0 && !atomic_load(&g_paused)) {
+  if (ring_fill() > 0) {
     g_drained_at = 0;
     return 0;
   }
-  if (ring_fill() > 0) return 0;
   if (g_drained_at == 0) {
     g_drained_at = SDL_GetTicks();
     if (g_drained_at == 0) g_drained_at = 1;

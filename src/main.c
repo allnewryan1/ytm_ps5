@@ -221,6 +221,15 @@ static void fmt_time(char *d, int n, int sec) {
   else snprintf(d, (size_t)n, "%d:%02d", m, s);
 }
 
+/* Remove the last UTF-8 character of s. */
+static void utf8_pop(char *s) {
+  size_t L = strlen(s);
+  if (L == 0) return;
+  L--;
+  while (L > 0 && ((unsigned char)s[L] & 0xC0) == 0x80) L--;
+  s[L] = 0;
+}
+
 static void fit(char *dst, int n, const char *src, int scale, int max_px) {
   int full;
   if (!dst || n < 1) return;
@@ -228,11 +237,12 @@ static void fit(char *dst, int n, const char *src, int scale, int max_px) {
   if (dst != src) snprintf(dst, (size_t)n, "%s", src ? src : "");
   if (text_px(dst, scale) <= max_px) return;
   full = (int)strlen(dst);
-  while (dst[0] && text_px(dst, scale) > max_px) dst[strlen(dst) - 1] = 0;
-  if ((int)strlen(dst) < full && (int)strlen(dst) >= 2) {
-    int L = (int)strlen(dst);
-    dst[L - 1] = '.';
-    dst[L - 2] = '.';
+  /* Drop whole characters, so a cut never leaves half of a multi-byte one (drawn as '?'). */
+  while (dst[0] && text_px(dst, scale) > max_px) utf8_pop(dst);
+  if ((int)strlen(dst) < full && dst[0] && dst[1]) {
+    utf8_pop(dst);
+    if (dst[0]) utf8_pop(dst);
+    snprintf(dst + strlen(dst), (size_t)n - strlen(dst), "..");
   }
 }
 
@@ -327,7 +337,8 @@ static void do_search(const char *q, int typed) {
   int n;
   int from = g_body;
   if (from != BODY_LIST && from != BODY_SEARCH) remember_here();
-  if (typed) snprintf(g_query, sizeof g_query, "%s", q);
+  /* The keyboard passes g_query itself; copying a buffer onto itself is undefined. */
+  if (typed && q != g_query) snprintf(g_query, sizeof g_query, "%s", q);
   snprintf(g_list_title, sizeof g_list_title, "%s", q);
   set_status("Searching YouTube Music...");
   paint();
@@ -350,17 +361,22 @@ static void do_search(const char *q, int typed) {
   }
 }
 
-static void play_queue_index(int idx) {
+/* Play queue row idx. 0 when it started. On failure nothing keeps playing and the queue
+ * points at the row that failed, so the queue and the speaker never disagree. */
+static int play_queue_index(int idx) {
   char err[192];
   char url[8192];
   int dur = 0;
-  if (idx < 0 || idx >= g_nqueue) return;
+  if (idx < 0 || idx >= g_nqueue) return -1;
   snprintf(g_status, sizeof g_status, "Opening %s", g_queue[idx].title);
   paint();
+  g_qindex = idx;
+  g_qpick = idx;
   if (ytm_audio_url(g_queue[idx].id, url, (int)sizeof url, &dur, err, (int)sizeof err) != 0) {
+    player_stop();
     set_status(err);
     toast(err);
-    return;
+    return -1;
   }
   if (dur > 0) g_queue[idx].seconds = dur;
   /* Headers only. The decoder streams the file on its own thread. */
@@ -368,21 +384,34 @@ static void play_queue_index(int idx) {
   if (player_start(url, g_queue[idx].seconds) != 0) {
     set_status(player_error()[0] ? player_error() : "Playback failed");
     toast(g_status);
-    return;
+    return -1;
   }
-  g_qindex = idx;
-  g_qpick = idx;
   g_player_ui = 1;
   set_status("");
+  return 0;
+}
+
+/* Songs in a row that stopped on an error. Reset when one ends cleanly or the user picks. */
+static int g_fail_streak;
+
+/* Play idx, or the next rows after it when a song cannot be opened (removed, region
+ * locked). Gives up after a few in a row so a dead list does not spin. */
+static int play_from(int idx) {
+  int tries;
+  for (tries = 0; tries < 3 && idx < g_nqueue; tries++, idx++) {
+    if (play_queue_index(idx) == 0) return 0;
+  }
+  return -1;
 }
 
 static void play_list(Track *list, int n, int idx) {
   if (n <= 0 || idx < 0 || idx >= n) return;
   g_queue_mix = 0;
+  g_fail_streak = 0;
   if (n > YTM_TRACK_CAP) n = YTM_TRACK_CAP;
   memcpy(g_queue, list, (size_t)n * sizeof(Track));
   g_nqueue = n;
-  play_queue_index(idx);
+  play_from(idx);
 }
 
 static int queue_find(const char *id) {
@@ -433,15 +462,22 @@ static void play_one(const Track *t) {
     return;
   }
   pick = *t;
+  g_fail_streak = 0;
   g_queue[0] = pick;
   g_nqueue = 1;
   g_qpick = 0;
   g_queue_mix = 0;
-  play_queue_index(0);
-  if (g_qindex != 0 || strcmp(g_queue[0].id, pick.id) != 0) return;
+  if (play_queue_index(0) == 0) {
+    if (queue_add_mix(pick.id) > 0) {
+      g_queue_mix = 1;
+      paint();
+    }
+    return;
+  }
+  /* The song itself would not open. Its mix usually still does. */
   if (queue_add_mix(pick.id) > 0) {
     g_queue_mix = 1;
-    paint();
+    play_from(1);
   }
 }
 
@@ -495,20 +531,23 @@ static void maybe_advance(void) {
   if (!player_ended()) return;
   player_ack_ended();
   if (player_error()[0]) {
+    /* A song that stops on an error skips ahead, up to a few in a row. */
     set_status(player_error());
-    return;
-  }
-  if (g_repeat == REP_ONE && g_qindex >= 0) {
-    player_replay();
-    return;
+    if (++g_fail_streak >= 3) return;
+  } else {
+    g_fail_streak = 0;
+    if (g_repeat == REP_ONE && g_qindex >= 0) {
+      player_replay();
+      return;
+    }
   }
   if (g_qindex + 1 >= g_nqueue && g_queue_mix && g_repeat == REP_OFF && g_qindex >= 0) {
     /* The mix ran out: continue it from the song that just ended. */
     if (g_nqueue >= YTM_TRACK_CAP) queue_drop_played();
     queue_add_mix(g_queue[g_qindex].id);
   }
-  if (g_qindex + 1 < g_nqueue) play_queue_index(g_qindex + 1);
-  else if (g_repeat == REP_ALL && g_nqueue > 0) play_queue_index(0);
+  if (g_qindex + 1 < g_nqueue) play_from(g_qindex + 1);
+  else if (g_repeat == REP_ALL && g_nqueue > 0) play_from(0);
 }
 
 static void open_shelf(int idx) {
@@ -1666,8 +1705,17 @@ static void poll_input(void) {
   int dx = 0, dy = 0;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_QUIT) g_run = 0;
-    if (e.type == SDL_CONTROLLERDEVICEADDED && !g_pad)
+    if (e.type == SDL_CONTROLLERDEVICEADDED && !g_pad) {
       g_pad = SDL_GameControllerOpen(e.cdevice.which);
+      memset(g_prev, 0, sizeof g_prev);
+    }
+    /* The DualSense sleeps or loses power; keep the dead handle and the next pad is ignored. */
+    if (e.type == SDL_CONTROLLERDEVICEREMOVED && g_pad &&
+        e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad))) {
+      SDL_GameControllerClose(g_pad);
+      g_pad = NULL;
+      g_hold = 0;
+    }
     if (e.type == SDL_TEXTINPUT && g_body == BODY_SEARCH && !g_player_ui) {
       const char *t = e.text.text;
       if (t && t[0] >= 32 && t[0] < 127 && (int)strlen(g_query) + 1 < (int)sizeof g_query) {
@@ -1689,6 +1737,11 @@ static void poll_input(void) {
         } else on_back();
       } else if (k == SDLK_f) g_player_ui = !g_player_ui;
     }
+  }
+  if (g_pad && !SDL_GameControllerGetAttached(g_pad)) {
+    SDL_GameControllerClose(g_pad);
+    g_pad = NULL;
+    g_hold = 0;
   }
   if (!g_pad) {
     for (int i = 0; i < SDL_NumJoysticks(); i++) {
@@ -1753,8 +1806,6 @@ static void poll_input(void) {
     g_trig_l = 0;
     g_trig_r = 0;
   }
-  /* Keep d-pad edges honest even when we drive movement from hold_dir. */
-  (void)SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
   hold_dir(dx, dy);
 }
 
