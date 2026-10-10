@@ -4,3 +4,9 @@ build/
 *.o
 sce_module/*.prx
 ytm-audioprobe.elf
+# Decoded and encoded by scripts/decode-assets.sh and encode-bc7.py
+sce_sys/icon0.png
+sce_sys/background-source.jpg
+sce_sys/launch-background-source.jpg
+sce_sys/pic0.dds
+sce_sys/pic1.dds
