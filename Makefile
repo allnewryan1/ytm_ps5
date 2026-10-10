@@ -25,7 +25,13 @@ endif
 
 ELF := ytmusic.elf
 
-SRCS := src/main.c src/text.c src/net.c src/player.c src/latebind.c src/art.c
+SRCS := src/main.c src/text.c src/net.c src/player.c src/latebind.c src/art.c src/daemon_client.c
+
+# ytmusicd, the background payload. It is always a loader payload (the app sends it to the
+# ELF loader on port 9021), stripped and embedded in both app builds by src/daemon_blob.S.
+DAEMON := build/ytmusicd.elf
+DAEMON_STRIPPED := build/ytmusicd.stripped.elf
+BLOB := src/daemon_blob.S
 
 CFLAGS += -std=c11 -Wall -Wextra -Wno-unused-parameter -O2 -g \
 	-I$(HB_INC) -I$(HB_INC)/SDL2 -D_REENTRANT
@@ -60,7 +66,7 @@ LIBS := $(SDL_LIBS) $(FF_LIBS) \
 # Home-screen eboot is not the elfldr payload. Link a PIE at address 0,
 # then convert it to a PS5 module (e_type 0xFE10) before signing.
 NATIVE_DIR := build/native
-NATIVE_OBJS := $(patsubst src/%.c,$(NATIVE_DIR)/%.o,$(SRCS))
+NATIVE_OBJS := $(patsubst src/%.c,$(NATIVE_DIR)/%.o,$(SRCS)) $(NATIVE_DIR)/daemon_blob.o
 NATIVE_APP := $(NATIVE_DIR)/bigapp.o
 NATIVE_CRT := $(NATIVE_DIR)/app_crt.o
 NATIVE_PIE := $(NATIVE_DIR)/llvm-pie.elf
@@ -70,16 +76,29 @@ NATIVE_STUBS := $(filter-out %/libkernel_sys.so %/libkernel_web.so %/libkernel_s
 NATIVE_LIBC := $(NATIVE_DIR)/libc-nodl.a
 NATIVE_COMPAT := $(NATIVE_DIR)/payload_compat.o
 
-.PHONY: all clean test package probe
+.PHONY: all clean test package probe daemon
 
 all: $(ELF)
 
-$(ELF): $(SRCS) src/ui_font.h src/app.h
-	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LIBS)
+$(DAEMON): src/daemon.c src/ytmd.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -Wall -Wextra -O2 -o $@ src/daemon.c
 
-$(NATIVE_DIR)/%.o: src/%.c src/ui_font.h src/app.h
+$(DAEMON_STRIPPED): $(DAEMON)
+	$(STRIP) --strip-all -o $@ $<
+
+daemon: $(DAEMON)
+
+$(ELF): $(SRCS) $(BLOB) $(DAEMON_STRIPPED) src/ui_font.h src/app.h src/ytmd.h
+	$(CC) $(CFLAGS) -o $@ $(SRCS) $(BLOB) $(LIBS)
+
+$(NATIVE_DIR)/%.o: src/%.c src/ui_font.h src/app.h src/ytmd.h
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -fPIC -ffunction-sections -fdata-sections -c -o $@ $<
+
+$(NATIVE_DIR)/daemon_blob.o: $(BLOB) $(DAEMON_STRIPPED)
+	mkdir -p $(dir $@)
+	$(CC) -fPIC -c -o $@ $(BLOB)
 
 $(NATIVE_CRT): third_party/ps5-native/app_crt.cpp
 	mkdir -p $(dir $@)
@@ -128,7 +147,7 @@ $(PROBE): tools/audioprobe.c
 
 clean:
 	rm -f $(ELF) $(PROBE)
-	rm -rf dist build/native
+	rm -rf dist build/native $(DAEMON) $(DAEMON_STRIPPED)
 
 test: $(ELF)
 	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $(ELF)

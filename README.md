@@ -11,6 +11,8 @@ Download the latest [release](https://github.com/allnewryan1/ytm_ps5/releases). 
 - **`ytmusic-*.elf`**: send it to an ELF loader listening on port 9021.
 - **`PPSA99105.zip`**: a home-screen app for ShadowMountPlus. Unzip it and copy the `PPSA99105` folder (not the zip) to `/data/homebrew/`. If the tile does not appear, set the folder and its contents to mode `777` from your FTP client.
 
+Either way, the app starts its own background player through the ELF loader on port 9021 (etaHEN or elfldr) and stops it when you quit or close the app.
+
 ## Controls
 
 | Input | Action |

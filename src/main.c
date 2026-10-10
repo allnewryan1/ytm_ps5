@@ -1,4 +1,5 @@
 #include "app.h"
+#include "daemon_client.h"
 #include "net.h"
 #include "player.h"
 #include "text.h"
@@ -1561,6 +1562,8 @@ static void paint(void) {
     }
   } else if (g_body == BODY_ACCOUNT) {
     const char *shown = g_verify_url;
+    snprintf(line, sizeof line, "Background player: %s", ytmd_status());
+    draw_text(&d, RAIL + 28, 840, 1, M3_OUTLINE, line);
     draw_text(&d, RAIL + 28, 16, 2, M3_ON_SURFACE, ytm_signed_in() ? "Account" : "Sign in");
     if (!ytm_signed_in()) {
       if (strncmp(shown, "https://", 8) == 0) shown += 8;
@@ -1839,6 +1842,13 @@ int main(int argc, char **argv) {
     set_status(err);
     toast(err);
   }
+  /* The background player is optional: without an ELF loader the app plays as before. */
+  if (!g_status[0]) {
+    set_status("Starting the background player...");
+    paint();
+  }
+  ytmd_start();
+  if (strncmp(g_status, "Starting the background", 23) == 0) set_status("");
   {
     int net_ok = net_init(err, (int)sizeof err) == 0;
     if (!net_ok) {
@@ -1877,10 +1887,14 @@ int main(int argc, char **argv) {
       }
     }
     maybe_advance();
+    ytmd_tick();
     paint();
     SDL_Delay(16);
   }
 
+  /* Quit stops the background player. A force close never gets here; the daemon notices
+   * its connection close and exits by itself. */
+  ytmd_stop();
   player_close();
   net_shutdown();
   if (g_pad) SDL_GameControllerClose(g_pad);

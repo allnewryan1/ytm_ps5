@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0
+
+- The app starts a small background player, ytmusicd, by sending it to the ELF loader on port 9021 (etaHEN or elfldr). No extra file or setup. It runs in its own process, so it keeps running while the app is suspended for a game. Quit stops it, and so does force closing the app: it exits as soon as its connection to the app closes. A copy that was started but never reached by the app exits after 15 seconds.
+- Account shows the background player's state. Without an ELF loader the app works exactly as before.
+- The background player does not play audio yet. Playback moves into it once the audio probe (`make probe`, `tools/audioprobe.c`) confirms which audio output stays audible during a game.
+
 ## 0.9.1
 
 - Typed search no longer copies the query onto itself. That was undefined behavior and could blank the search.
