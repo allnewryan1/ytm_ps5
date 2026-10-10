@@ -48,11 +48,13 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -eu
-          test -s artifact/ytmusic.elf
-          test -s artifact/dist/PPSA99105/eboot.bin
+          elf="$(find artifact -type f -name ytmusic.elf | head -1)"
+          app="$(find artifact -type d -name PPSA99105 | head -1)"
+          test -s "$elf"
+          test -s "$app/eboot.bin"
           mkdir -p dist/release
-          cp artifact/ytmusic.elf "dist/release/ytmusic-${TAG}.elf"
-          (cd artifact/dist && zip -qr ../../dist/release/PPSA99105.zip PPSA99105)
+          cp "$elf" "dist/release/ytmusic-${TAG}.elf"
+          (cd "$(dirname "$app")" && zip -qr "$GITHUB_WORKSPACE/dist/release/PPSA99105.zip" PPSA99105)
           (cd dist/release && sha256sum -- *.elf *.zip > SHA256SUMS.txt)
           ls -la dist/release
 
