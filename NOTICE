@@ -1,7 +1,9 @@
-Home and charts browsing in this program follows the request shape of
-ytmusicapi's YTMusic.get_home and YTMusic.get_charts
-(https://github.com/sigma67/ytmusicapi): browse ids FEmusic_home and
-FEmusic_charts, and a charts formData selectedValues country code.
+Home, charts, liked songs, and the automix queue in this program follow the
+request shape of ytmusicapi's YTMusic.get_home, get_charts, get_liked_songs and
+get_watch_playlist, and its OAuth client flow
+(https://github.com/sigma67/ytmusicapi): browse ids FEmusic_home, FEmusic_charts
+and VLLM, a charts formData selectedValues country code, and the next endpoint
+with playlist RDAMVM<videoId>.
 The Python library itself is not included. Its license follows.
 
 MIT License

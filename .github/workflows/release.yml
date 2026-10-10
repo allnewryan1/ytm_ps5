@@ -1,12 +1,5 @@
-# YouTube Music PS5 release
-#
-# Runs only after the "build" workflow finishes green on main. That workflow
-# is the test: it links the payload, packages the homebrew folder, and
-# rejects an ELF that used the host loader. This job does not rebuild. It
-# publishes the artifact that already passed.
-#
-# Tag is v<VERSION>-<short sha> of the tested commit, so each green main
-# build gets its own release and "latest" is the newest one that passed.
+# Publishes the artifact from a green "build" run on main. Nothing is rebuilt.
+# The tag is v<VERSION>-<short sha>, so every green main build is its own release.
 name: release
 
 on:
@@ -27,12 +20,14 @@ jobs:
       (github.event.workflow_run.event == 'push' ||
        github.event.workflow_run.event == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ env.SHA }}
 
-      - name: Download the tested payload
+      - name: Download the tested build
         uses: actions/download-artifact@v8
         with:
           name: ytmusic-elf
@@ -40,82 +35,58 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Resolve version
+      - name: Version and tag
         id: ver
         run: |
           set -eu
           VER="$(tr -d '[:space:]' < VERSION)"
-          SHA="${{ github.event.workflow_run.head_sha }}"
-          SHORT="$(printf '%s' "$SHA" | cut -c1-7)"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${VER}-${SHORT}" >> "$GITHUB_OUTPUT"
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}-${SHA:0:7}" >> "$GITHUB_OUTPUT"
 
-      - name: Collect artifacts
+      - name: Package files
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -eu
-          ELF="$(find artifact -type f -name ytmusic.elf | head -1)"
-          HB="$(find artifact -type d -name PPSA99105 | head -1)"
-          test -n "$ELF"
-          test -n "$HB"
-          test -s "$ELF"
-          test -s "$HB/eboot.bin"
-          test ! -e "$HB/eboot.elf"
-          test -s "$HB/sce_module/libc.prx"
-          test -s "$HB/homebrew.js"
+          elf="$(find artifact -type f -name ytmusic.elf | head -1)"
+          app="$(find artifact -type d -name PPSA99105 | head -1)"
+          test -s "$elf"
+          test -s "$app/eboot.bin"
           mkdir -p dist/release
-          T="${{ steps.ver.outputs.tag }}"
-          cp "$ELF" "dist/release/ytmusic-${T}.elf"
-          python3 - "$HB" "dist/release/PPSA99105.zip" <<'PY'
-          import sys, zipfile
-          from pathlib import Path
-          src = Path(sys.argv[1])
-          out = Path(sys.argv[2])
-          with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
-              for path in sorted(src.rglob("*")):
-                  if path.is_file():
-                      z.write(path, Path(src.name) / path.relative_to(src))
-          PY
-          ( cd dist/release && sha256sum -- * > SHA256SUMS.txt )
+          cp "$elf" "dist/release/ytmusic-${TAG}.elf"
+          (cd "$(dirname "$app")" && zip -qr "$GITHUB_WORKSPACE/dist/release/PPSA99105.zip" PPSA99105)
+          (cd dist/release && sha256sum -- *.elf *.zip > SHA256SUMS.txt)
           ls -la dist/release
 
       - name: Release notes
+        env:
+          VER: ${{ steps.ver.outputs.version }}
         run: |
           set -eu
-          V="${{ steps.ver.outputs.version }}"
-          if awk -v v="## ${V}" '
-                $0 == v {found=1; next}
-                found && /^## / {exit}
-                found {print}
-              ' CHANGELOG.md > dist/release/NOTES.md && [ -s dist/release/NOTES.md ]; then
+          awk -v v="## ${VER}" '$0 == v {f=1; next} f && /^## / {exit} f {print}' CHANGELOG.md \
+            > dist/release/NOTES.md
+          if [ -s dist/release/NOTES.md ]; then
             printf '\n---\n\n' >> dist/release/NOTES.md
           else
-            echo "::warning::no CHANGELOG section for ${V}"
-            : > dist/release/NOTES.md
+            echo "::warning::no CHANGELOG section for ${VER}"
           fi
-          cat >> dist/release/NOTES.md <<EOF
+          cat >> dist/release/NOTES.md <<'NOTES'
           ## Install
 
           Two files from the same tested build:
 
-          * \`ytmusic-*.elf\` — send to the ELF loader already listening on port 9021.
-          * \`PPSA99105.zip\` — unzip and copy the \`PPSA99105\` folder to \`/data/homebrew/\`. ShadowMountPlus wants \`eboot.bin\` at \`/data/homebrew/PPSA99105/eboot.bin\`, plus \`sce_module/libc.prx\` and \`sce_sys/\`. Do not put the zip itself in that folder.
+          * `ytmusic-*.elf`: send to the ELF loader already listening on port 9021.
+          * `PPSA99105.zip`: unzip and copy the `PPSA99105` folder to `/data/homebrew/`. ShadowMountPlus wants `eboot.bin` at `/data/homebrew/PPSA99105/eboot.bin`, plus `sce_module/libc.prx` and `sce_sys/`. Do not put the zip itself in that folder.
 
-          This repository does not include a jailbreak. The console has to be on firmware 13.60 and already running a loader.
-
-          ## Verification
-
-          Published because the [build workflow](${{ github.event.workflow_run.html_url }}) passed on \`${{ steps.ver.outputs.sha }}\`. That run linked the payload with clang 18, PS5 Payload SDK v0.42, and pacbrew v0.39, and rejected the ELF if it used the host loader. CI has no console, so this build is not hardware-tested. Checksums are in \`SHA256SUMS.txt\`.
-          EOF
+          This repository does not include a jailbreak.
+          NOTES
 
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          target_commitish: ${{ steps.ver.outputs.sha }}
+          target_commitish: ${{ env.SHA }}
           name: v${{ steps.ver.outputs.version }}
           body_path: dist/release/NOTES.md
-          draft: false
-          prerelease: false
           make_latest: true
           files: |
             dist/release/ytmusic-*.elf

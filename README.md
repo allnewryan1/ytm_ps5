@@ -1,48 +1,15 @@
 # YouTube Music for PS5
 
-Native userland payload for a jailbroken PS5 on system software 13.60. It is a DualSense client for searching, browsing shelves, playing songs, and opening the liked songs on a signed-in account. It is not a website, and it does not include a jailbreak.
+A native YouTube Music client for a jailbroken PS5 on firmware 13.60, played with the DualSense: search, Home recommendations, song mixes, and your liked songs. It does not include a jailbreak.
 
-The build uses the [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk): `prospero.mk`, an ELF, and `PS5_DEPLOY` to an ELF loader on port **9021**. Video is SDL2 on sceVideoOut. Audio is FFmpeg into sceAudioOut. HTTPS calls to YouTube use sceHttp2, the same calls as the SDK `http2_get` sample.
+This is a fan project, not affiliated with Google, YouTube, or Sony.
 
-This is a fan client. It is not affiliated with Google, YouTube, or Sony.
+## Install
 
-## GitHub Actions
+Download the latest [release](https://github.com/allnewryan1/ytm_ps5/releases). It has two builds of the same code:
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) builds this repository's Docker image (Ubuntu 24.04, clang 18, Payload SDK **v0.42**, pacbrew **v0.39**), runs `make` and `make package`, and rejects the ELF if it linked the host loader. When that workflow succeeds on `main`, [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the tested ELF and homebrew folder as `v<VERSION>-<commit>`.
-
-Other workflows label issues and pull requests, greet first-time contributors, and close stale issues and pull requests. Adding issues to a GitHub Project stays off until `ROADMAP_PROJECT_URL` and `ADD_TO_PROJECT_PAT` are set.
-
-## What you need
-
-- A PS5 on 13.60 that already has an ELF loader listening on port 9021. This repository does not include an exploit.
-- The PS5 Payload SDK, usually installed at `/opt/ps5-payload-sdk`.
-- pacbrew **SDL2** and **FFmpeg 7**, installed into that SDK's `target/user/homebrew` tree.
-
-## Build and send
-
-```bash
-export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
-export PS5_HOST=192.168.1.50
-export PS5_PORT=9021
-make
-make test
-```
-
-`make test` runs the SDK's `PS5_DEPLOY` against the loader.
-
-To install the homebrew folder, copy it to the console with the FTP server you already run:
-
-```bash
-make package
-```
-
-That writes `dist/PPSA99105/`. ShadowMountPlus installs that folder, not a PKG. Copy the folder (not the zip) to `/data/homebrew/` so the console sees:
-
-- `/data/homebrew/PPSA99105/eboot.bin`
-- `/data/homebrew/PPSA99105/sce_module/libc.prx`
-- `/data/homebrew/PPSA99105/sce_sys/` (`param.json`, `icon0.png`, `pic0.dds`, `pic1.dds`)
-
-The install folder stays `PPSA99105`. The home screen title is YouTube Music. `eboot.bin` is a native PS5 program (not the loader payload). `libc.prx` is a clean-room runtime shim from [ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore) (GPL-3.0-or-later). It is not a Sony library. If the tile does not show up, set the folder and everything in it to mode `777` from your FTP client. The separate `ytmusic.elf` file is still what an ELF loader on port 9021 runs.
+- **`ytmusic-*.elf`**: send it to an ELF loader listening on port 9021.
+- **`PPSA99105.zip`**: a home-screen app for ShadowMountPlus. Unzip it and copy the `PPSA99105` folder (not the zip) to `/data/homebrew/`. If the tile does not appear, set the folder and its contents to mode `777` from your FTP client.
 
 ## Controls
 
@@ -50,24 +17,57 @@ The install folder stays `PPSA99105`. The home screen title is YouTube Music. `e
 | --- | --- |
 | D-pad / left stick | Move |
 | Cross | Open, play, or pause |
-| Square | Song menu. On Search, deletes a character |
+| Square | Song menu: Play, Play next, Add to queue, Show album, Show artist. On Search, deletes a character |
 | Circle | Back |
-| Triangle | Now playing, queue on that card |
-| Options | Play or pause. Does nothing if nothing is playing |
-| Touchpad | Cycle repeat: off, all, one |
+| Triangle | Now playing and the queue |
+| Options | Play or pause |
+| Touchpad | Repeat: off, all, one |
 | L1 / R1 | Previous / next |
-| L2 / R2 | Volume, while Now playing is open |
-| Left / right on the player | Seek 10 seconds |
-| Up / down on the player | Move through the queue |
+| L2 / R2 | Volume, on Now playing |
+| Left / right on Now playing | Seek 10 seconds |
 
-Cross on a song plays that song. If it is not already in the queue, YouTube's radio mix for that song replaces the queue, with the song first. Signed in, that mix is requested with the account. Add to queue still adds only that song. Play next inserts it after the current one. Opening an album or a playlist with Cross still replaces the queue with that list.
+Playing a song starts a mix built from it. If the song is already in the queue, playback jumps to it instead. Add to queue and Play next add only that song. Opening an album or playlist plays that list.
 
-A USB keyboard works too: arrows, Enter, Esc, and Backspace.
+Music videos are marked **Video** and podcast episodes **Episode**. A USB keyboard also works: arrows, Enter, Esc, and Backspace.
+
+## Your own Home recommendations
+
+Signing in with the on-screen code loads your library. For Home to show your own recommendations, YouTube Music needs a token from your own Google OAuth client, the same requirement [ytmusicapi](https://ytmusicapi.readthedocs.io/en/stable/setup/oauth.html) has. Without one, Home shows public picks.
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **YouTube Data API v3**.
+2. Under **APIs & Services → Credentials**, create an **OAuth client ID** of type **TVs and Limited Input devices**. If the consent screen is in testing, add your Google account as a test user.
+3. Save the ID and secret on the console as `/data/ytmusic/oauth_client.txt`:
+
+   ```
+   client_id=1234567890-abc.apps.googleusercontent.com
+   client_secret=GOCSPX-...
+   ```
+
+4. Restart the app, then sign out and back in from **Account**. The Account page shows which sign-in is in use.
 
 ## If a song will not play
 
-YouTube sometimes returns a signed stream instead of a direct audio URL, or it refuses the player client. The status line on screen is the actual error. Search still works when the catalog responds. Playback needs a `googlevideo.com` audio URL and an FFmpeg build with HTTPS.
+The status line shows YouTube's error. Songs that cannot be opened are skipped when the queue moves on.
+
+## Build
+
+You need the [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk) v0.42 at `/opt/ps5-payload-sdk`, with pacbrew SDL2 and FFmpeg 7 (pacbrew-repo v0.39) installed into its `target/user/homebrew` prefix. The `Dockerfile` sets all of that up.
+
+```bash
+make                     # ytmusic.elf
+PS5_HOST=192.168.1.50 make test    # send it to the loader on port 9021
+
+# Home-screen folder: decode and encode the launcher images first (needs Pillow and NumPy)
+sh scripts/decode-assets.sh
+python3 scripts/encode-bc7.py sce_sys/background-source.jpg sce_sys/pic0.dds
+python3 scripts/encode-bc7.py sce_sys/launch-background-source.jpg sce_sys/pic1.dds
+make package             # dist/PPSA99105/
+```
+
+With Docker: `docker build -t ytm-ps5 . && docker run --rm -v "$PWD:/workspace" ytm-ps5 make`.
+
+Pushes to `main` and pull requests are built and checked by [`build.yml`](.github/workflows/build.yml). A green build on `main` is published by [`release.yml`](.github/workflows/release.yml) as `v<VERSION>-<commit>`.
 
 ## Notices
 
-Home and charts requests follow the browse identifiers used by [ytmusicapi](https://github.com/sigma67/ytmusicapi) (`FEmusic_home` and `FEmusic_charts`). That project is MIT licensed. The notice is in [NOTICE](NOTICE). This program does not include the Python library.
+Home, charts, liked songs, and mixes follow the requests [ytmusicapi](https://github.com/sigma67/ytmusicapi) makes (MIT; see [NOTICE](NOTICE)). The library itself is not included. `sce_module/libc.prx` is a clean-room runtime shim from [ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore) (GPL-3.0-or-later), not a Sony library.

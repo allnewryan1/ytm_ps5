@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.1
+
+- Typed search no longer copies the query onto itself. That was undefined behavior and could blank the search.
+- The controller works again after the DualSense sleeps or loses power. The dead handle was kept, so the reconnect was ignored.
+- A song that cannot be opened no longer leaves the old song playing under a new queue. Playback skips to the next song, up to three in a row. If the song you picked will not open, its mix still plays.
+- A seek in the last second and a half of a song works instead of ending the song. Repeat one rewinds the open stream instead of fetching the song again.
+- The home-screen build's allocator waits on heap setup with atomic reads, so a second thread cannot spin forever, and it refuses sizes that would overflow.
+- The decoder thread no longer shares the error-text buffer with the screen.
+- Shortened titles are cut between characters, so accented and non-Latin titles do not end in "?".
+- Removed code nothing called: the audio URL prefetch cache and the in-memory playback path. One helper replaces the repeated JSON sub-object lookups, and playlist ids are converted in one place.
+
+## 0.9.0
+
+- Home can show the account's own recommendations. It makes the request ytmusicapi `get_home` makes with OAuth: `music.youtube.com/youtubei/v1/browse?alt=json`, client WEB_REMIX, `"user":{}`, a Bearer token, and `X-Goog-Request-Time`. As in ytmusicapi, that needs a token from your own Google Cloud OAuth client; put it in `/data/ytmusic/oauth_client.txt` (see README), then sign out and in. Without it, Home tries the Android client from 0.8.1, then shows public picks with a note, not your liked songs.
+- The song mix uses the same signed-in request as ytmusicapi `get_watch_playlist`, with the Android client from 0.8.1 as the fallback. The song starts playing first and the mix fills in behind it, and a mix that runs out continues from the last song. A song's music-video counterpart is no longer added beside it.
+- Audio: clearing the buffer on a seek or a new song locks the audio device, so it cannot race the callback. Volume ramps over one buffer instead of clicking. A song ends after its last sample has played out. Dropped streams resume with a Range request at the last packet.
+- Covers trim bars only when they are matched on both sides, and also trim the side bars of a 16:9 frame. A square cover with a dark edge is left alone.
+- Podcast episodes are marked Episode. Video and Episode are drawn as chips.
+
 ## 0.8.1
 
 - A new song's mix is requested from the Android Music client. Signed in, that request carries the account token, so the mix can follow the account. If Android refuses the token, the public mix for that song is used instead. The music web client is not sent the token.

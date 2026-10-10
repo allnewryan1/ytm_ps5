@@ -49,7 +49,7 @@ static const char *moods[][2] = {
     {"Energy", "workout electronic"},
     {"Hip-hop", "hip hop mix"},
     {"Jazz", "jazz instrumental"},
-    {"Rock", "rock"},
+    {"Rock", "rock hits"},
     {"Pop", "pop hits"},
     {"Night", "late night drive"},
 };
@@ -94,6 +94,8 @@ static Track g_queue[YTM_TRACK_CAP];
 static int g_nqueue;
 static Track g_scratch[YTM_TRACK_CAP];
 static int g_qindex = -1;
+/* 1 while the queue is an automix that may be topped up when it runs out. */
+static int g_queue_mix;
 static int g_qpick;
 static int g_menu;
 static int g_menu_sel;
@@ -219,6 +221,15 @@ static void fmt_time(char *d, int n, int sec) {
   else snprintf(d, (size_t)n, "%d:%02d", m, s);
 }
 
+/* Remove the last UTF-8 character of s. */
+static void utf8_pop(char *s) {
+  size_t L = strlen(s);
+  if (L == 0) return;
+  L--;
+  while (L > 0 && ((unsigned char)s[L] & 0xC0) == 0x80) L--;
+  s[L] = 0;
+}
+
 static void fit(char *dst, int n, const char *src, int scale, int max_px) {
   int full;
   if (!dst || n < 1) return;
@@ -226,11 +237,12 @@ static void fit(char *dst, int n, const char *src, int scale, int max_px) {
   if (dst != src) snprintf(dst, (size_t)n, "%s", src ? src : "");
   if (text_px(dst, scale) <= max_px) return;
   full = (int)strlen(dst);
-  while (dst[0] && text_px(dst, scale) > max_px) dst[strlen(dst) - 1] = 0;
-  if ((int)strlen(dst) < full && (int)strlen(dst) >= 2) {
-    int L = (int)strlen(dst);
-    dst[L - 1] = '.';
-    dst[L - 2] = '.';
+  /* Drop whole characters, so a cut never leaves half of a multi-byte one (drawn as '?'). */
+  while (dst[0] && text_px(dst, scale) > max_px) utf8_pop(dst);
+  if ((int)strlen(dst) < full && dst[0] && dst[1]) {
+    utf8_pop(dst);
+    if (dst[0]) utf8_pop(dst);
+    snprintf(dst + strlen(dst), (size_t)n - strlen(dst), "..");
   }
 }
 
@@ -245,35 +257,88 @@ static void auth_save(void) {
     set_status("Could not save sign-in on this console");
     return;
   }
-  fprintf(f, "%s\n", t);
+  /* The second line says which OAuth client minted the token; refresh must use the same one. */
+  fprintf(f, "%s\n%s\n", t, ytm_token_custom() ? "client=custom" : "client=tv");
   fclose(f);
+}
+
+static void trim_line(char *s) {
+  char *a = s;
+  size_t n;
+  s[strcspn(s, "\r\n")] = 0;
+  while (*a == ' ' || *a == '\t') a++;
+  if (a != s) memmove(s, a, strlen(a) + 1);
+  n = strlen(s);
+  while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = 0;
+}
+
+/* /data/ytmusic/oauth_client.txt: the client id and secret of a Google Cloud OAuth client of
+ * type "TVs and Limited Input devices", one per line (or client_id=... / client_secret=...).
+ * This is what ytmusicapi asks for; see README. */
+static void oauth_client_load(void) {
+  FILE *f = fopen("/data/ytmusic/oauth_client.txt", "r");
+  char line[300];
+  char id[200];
+  char secret[120];
+  int plain = 0;
+  id[0] = 0;
+  secret[0] = 0;
+  if (!f) return;
+  while (fgets(line, sizeof line, f)) {
+    char *v;
+    trim_line(line);
+    if (!line[0] || line[0] == '#') continue;
+    v = strchr(line, '=');
+    if (v && strncmp(line, "client_id", 9) == 0) {
+      snprintf(id, sizeof id, "%s", v + 1);
+      trim_line(id);
+    } else if (v && strncmp(line, "client_secret", 13) == 0) {
+      snprintf(secret, sizeof secret, "%s", v + 1);
+      trim_line(secret);
+    } else if (!v && plain == 0) {
+      snprintf(id, sizeof id, "%s", line);
+      plain = 1;
+    } else if (!v && plain == 1) {
+      snprintf(secret, sizeof secret, "%s", line);
+      plain = 2;
+    }
+  }
+  fclose(f);
+  if (id[0] && secret[0]) ytm_set_oauth_client(id, secret);
 }
 
 static void auth_load(void) {
   FILE *f = fopen("/data/ytmusic/auth.txt", "r");
   char line[1100];
+  char kind[64];
   char err[192];
+  oauth_client_load();
   if (!f) return;
   if (!fgets(line, sizeof line, f)) {
     fclose(f);
     return;
   }
+  kind[0] = 0;
+  if (!fgets(kind, sizeof kind, f)) kind[0] = 0;
   fclose(f);
   line[strcspn(line, "\r\n")] = 0;
   if (!line[0]) return;
   ytm_set_refresh_token(line);
+  ytm_set_token_custom(strncmp(kind, "client=custom", 13) == 0);
   if (ytm_auth_refresh(err, (int)sizeof err) != 0) set_status(err);
 }
 
 static void paint(void);
 static void keep_sel_visible(int n);
 
-static void do_search(const char *q, int fill_bar) {
+/* typed is 1 for the search keyboard. Mood shortcuts search without typing into the bar. */
+static void do_search(const char *q, int typed) {
   char err[192];
   int n;
   int from = g_body;
   if (from != BODY_LIST && from != BODY_SEARCH) remember_here();
-  if (fill_bar) snprintf(g_query, sizeof g_query, "%s", q);
+  /* The keyboard passes g_query itself; copying a buffer onto itself is undefined. */
+  if (typed && q != g_query) snprintf(g_query, sizeof g_query, "%s", q);
   snprintf(g_list_title, sizeof g_list_title, "%s", q);
   set_status("Searching YouTube Music...");
   paint();
@@ -296,17 +361,22 @@ static void do_search(const char *q, int fill_bar) {
   }
 }
 
-static void play_queue_index(int idx) {
+/* Play queue row idx. 0 when it started. On failure nothing keeps playing and the queue
+ * points at the row that failed, so the queue and the speaker never disagree. */
+static int play_queue_index(int idx) {
   char err[192];
   char url[8192];
   int dur = 0;
-  if (idx < 0 || idx >= g_nqueue) return;
+  if (idx < 0 || idx >= g_nqueue) return -1;
   snprintf(g_status, sizeof g_status, "Opening %s", g_queue[idx].title);
   paint();
+  g_qindex = idx;
+  g_qpick = idx;
   if (ytm_audio_url(g_queue[idx].id, url, (int)sizeof url, &dur, err, (int)sizeof err) != 0) {
+    player_stop();
     set_status(err);
     toast(err);
-    return;
+    return -1;
   }
   if (dur > 0) g_queue[idx].seconds = dur;
   /* Headers only. The decoder streams the file on its own thread. */
@@ -314,20 +384,34 @@ static void play_queue_index(int idx) {
   if (player_start(url, g_queue[idx].seconds) != 0) {
     set_status(player_error()[0] ? player_error() : "Playback failed");
     toast(g_status);
-    return;
+    return -1;
   }
-  g_qindex = idx;
-  g_qpick = idx;
   g_player_ui = 1;
   set_status("");
+  return 0;
+}
+
+/* Songs in a row that stopped on an error. Reset when one ends cleanly or the user picks. */
+static int g_fail_streak;
+
+/* Play idx, or the next rows after it when a song cannot be opened (removed, region
+ * locked). Gives up after a few in a row so a dead list does not spin. */
+static int play_from(int idx) {
+  int tries;
+  for (tries = 0; tries < 3 && idx < g_nqueue; tries++, idx++) {
+    if (play_queue_index(idx) == 0) return 0;
+  }
+  return -1;
 }
 
 static void play_list(Track *list, int n, int idx) {
   if (n <= 0 || idx < 0 || idx >= n) return;
+  g_queue_mix = 0;
+  g_fail_streak = 0;
   if (n > YTM_TRACK_CAP) n = YTM_TRACK_CAP;
   memcpy(g_queue, list, (size_t)n * sizeof(Track));
   g_nqueue = n;
-  play_queue_index(idx);
+  play_from(idx);
 }
 
 static int queue_find(const char *id) {
@@ -339,49 +423,62 @@ static int queue_find(const char *id) {
   return -1;
 }
 
-/* A song already in the queue jumps to it. A new song starts that song's radio
- * mix. Add to queue is the path that appends only the one song. */
-static void lead_with(Track *list, int *n, const Track *seed) {
-  int i;
-  Track hold;
-  if (!list || !n || *n < 1 || !seed || !seed->id[0]) return;
-  for (i = 0; i < *n; i++) {
-    if (list[i].id[0] && strcmp(list[i].id, seed->id) == 0) break;
+/* Append the automix that follows id (ytmusicapi get_watch_playlist), skipping queued songs. */
+static int queue_add_mix(const char *id) {
+  char err[192];
+  int c, i, added = 0;
+  c = ytm_radio(id, g_scratch, YTM_TRACK_CAP, err, (int)sizeof err);
+  if (c <= 0) return 0;
+  for (i = 0; i < c && g_nqueue < YTM_TRACK_CAP; i++) {
+    if (!g_scratch[i].id[0] || queue_find(g_scratch[i].id) >= 0) continue;
+    g_queue[g_nqueue++] = g_scratch[i];
+    added++;
   }
-  if (i == *n) {
-    if (*n >= YTM_TRACK_CAP) *n = YTM_TRACK_CAP - 1;
-    memmove(list + 1, list, (size_t)(*n) * sizeof(Track));
-    list[0] = *seed;
-    (*n)++;
-    return;
-  }
-  if (i == 0) return;
-  hold = list[i];
-  memmove(list + 1, list, (size_t)i * sizeof(Track));
-  list[0] = hold;
+  return added;
 }
 
+/* Keep the current song and one before it, so a long mix can keep growing. */
+static void queue_drop_played(void) {
+  int drop = g_qindex - 1;
+  int i;
+  if (drop <= 0) return;
+  for (i = drop; i < g_nqueue; i++) g_queue[i - drop] = g_queue[i];
+  g_nqueue -= drop;
+  g_qindex -= drop;
+  g_qpick -= drop;
+  if (g_qpick < 0) g_qpick = 0;
+}
+
+/* A song that is already queued just jumps to it. Any other song starts a new queue: that
+ * song, then the automix YouTube Music builds from it (and from the account, when signed in
+ * with the OAuth client). Add to queue and Play next never replace the queue. */
 static void play_one(const Track *t) {
-  char err[192];
-  int at, n;
+  int at;
+  Track pick;
   if (!t || !t->id[0]) return;
   at = queue_find(t->id);
   if (at >= 0) {
     play_queue_index(at);
     return;
   }
-  set_status("Starting a mix...");
-  paint();
-  n = ytm_radio(t->id, g_scratch, YTM_TRACK_CAP, err, (int)sizeof err);
-  if (n > 0) {
-    lead_with(g_scratch, &n, t);
-    play_list(g_scratch, n, 0);
-    return;
-  }
-  g_queue[0] = *t;
+  pick = *t;
+  g_fail_streak = 0;
+  g_queue[0] = pick;
   g_nqueue = 1;
   g_qpick = 0;
-  play_queue_index(0);
+  g_queue_mix = 0;
+  if (play_queue_index(0) == 0) {
+    if (queue_add_mix(pick.id) > 0) {
+      g_queue_mix = 1;
+      paint();
+    }
+    return;
+  }
+  /* The song itself would not open. Its mix usually still does. */
+  if (queue_add_mix(pick.id) > 0) {
+    g_queue_mix = 1;
+    play_from(1);
+  }
 }
 
 static int queue_insert_new(const Track *t, int at) {
@@ -434,15 +531,23 @@ static void maybe_advance(void) {
   if (!player_ended()) return;
   player_ack_ended();
   if (player_error()[0]) {
+    /* A song that stops on an error skips ahead, up to a few in a row. */
     set_status(player_error());
-    return;
+    if (++g_fail_streak >= 3) return;
+  } else {
+    g_fail_streak = 0;
+    if (g_repeat == REP_ONE && g_qindex >= 0) {
+      player_replay();
+      return;
+    }
   }
-  if (g_repeat == REP_ONE && g_qindex >= 0) {
-    player_replay();
-    return;
+  if (g_qindex + 1 >= g_nqueue && g_queue_mix && g_repeat == REP_OFF && g_qindex >= 0) {
+    /* The mix ran out: continue it from the song that just ended. */
+    if (g_nqueue >= YTM_TRACK_CAP) queue_drop_played();
+    queue_add_mix(g_queue[g_qindex].id);
   }
-  if (g_qindex + 1 < g_nqueue) play_queue_index(g_qindex + 1);
-  else if (g_repeat == REP_ALL && g_nqueue > 0) play_queue_index(0);
+  if (g_qindex + 1 < g_nqueue) play_from(g_qindex + 1);
+  else if (g_repeat == REP_ALL && g_nqueue > 0) play_from(0);
 }
 
 static void open_shelf(int idx) {
@@ -581,7 +686,7 @@ static void load_home(void) {
   g_quick_sel = 0;
   g_mix_sel = 0;
   g_home_sec = ns > 0 ? 0 : 1;
-  set_status("");
+  set_status(ytm_home_note());
 }
 
 static int open_list(const char *browse, const char *title, int autoplay) {
@@ -747,15 +852,8 @@ static void on_activate(void) {
       g_body = BODY_HOME;
       if (!home_ready()) load_home();
     } else if (g_nav == NAV_SEARCH) {
-      int i;
       g_body = BODY_SEARCH;
       g_player_ui = 0;
-      for (i = 0; i < 8; i++) {
-        if (g_query[0] && strcmp(g_query, moods[i][1]) == 0) {
-          g_query[0] = 0;
-          break;
-        }
-      }
       set_status("");
     } else if (g_nav == NAV_EXPLORE) {
       g_body = BODY_EXPLORE;
@@ -796,6 +894,7 @@ static void on_activate(void) {
     if (g_acct_sel == 0) {
       ytm_auth_signout();
       remove("/data/ytmusic/auth.txt");
+      g_home_try = 0;
       g_auth_wait = 0;
       set_status("Signed out");
       toast("Signed out");
@@ -1111,6 +1210,25 @@ static void draw_track_art(Draw *d, int x, int y, int size, const Track *t) {
   else draw_cover(d, x, y, size, t->title[0] ? t->title : "M", 0);
 }
 
+/* Artist line. Music videos and episodes get a chip first, so they read apart from songs
+ * (YouTube Music musicVideoType: ATV is a song; OMV, UGC and OFFICIAL_SOURCE_MUSIC are videos). */
+static void draw_byline(Draw *d, char *line, int line_n, int x, int y, int max_px, const Track *t) {
+  const char *tag = NULL;
+  if (!t) return;
+  if (t->kind == YTM_KIND_VIDEO) tag = "Video";
+  else if (t->kind == YTM_KIND_EPISODE) tag = "Episode";
+  if (tag) {
+    int cw = text_px(tag, 1) + 20;
+    fill_round(d, x, y - 3, cw, 34, 8, M3_SECONDARY_CTN);
+    draw_text(d, x + 10, y, 1, M3_ON_SECONDARY_CTN, tag);
+    x += cw + 12;
+    max_px -= cw + 12;
+  }
+  if (max_px < 40) return;
+  fit(line, line_n, t->artist, 1, max_px);
+  draw_text(d, x, y, 1, M3_ON_SURFACE_VAR, line);
+}
+
 static void draw_menu(Draw *d) {
   Track *t;
   char line[120];
@@ -1172,16 +1290,6 @@ static void draw_hints(Draw *d) {
   draw_text(d, 28, HINT_Y + 16, 1, M3_ON_SURFACE_VAR, s);
 }
 
-static void subline(char *dst, int n, const Track *t) {
-  const char *a = (t && t->artist[0]) ? t->artist : "";
-  if (t && t->video && a[0])
-    snprintf(dst, (size_t)n, "Video · %s", a);
-  else if (t && t->video)
-    snprintf(dst, (size_t)n, "Video");
-  else
-    snprintf(dst, (size_t)n, "%s", a);
-}
-
 /* first_row is the first visible row of a 2-column grid. Returns y after the last row. */
 static int draw_two_col(Draw *d, char *line, int line_n, const Track *items, int n,
                         int sel_idx, int selected, int first_row, int x0, int y, int rows) {
@@ -1198,9 +1306,7 @@ static int draw_two_col(Draw *d, char *line, int line_n, const Track *items, int
       draw_track_art(d, x, yy, 56, &items[idx]);
       fit(line, line_n, items[idx].title, 1, 640);
       draw_text(d, x + 68, yy + 2, 1, M3_ON_SURFACE, line);
-      subline(line, line_n, &items[idx]);
-      fit(line, line_n, line, 1, 400);
-      draw_text(d, x + 68, yy + 30, 1, M3_ON_SURFACE_VAR, line);
+      draw_byline(d, line, line_n, x + 68, yy + 30, 400, &items[idx]);
     }
   }
   return y + rows * 74;
@@ -1249,9 +1355,7 @@ static void paint(void) {
     draw_track_art(&d, 72, 112, 280, now);
     fit(line, (int)sizeof line, now->title, 2, 860);
     draw_text(&d, 72, 412, 2, M3_ON_SURFACE, line);
-    subline(line, (int)sizeof line, now);
-    fit(line, (int)sizeof line, line, 1, 860);
-    draw_text(&d, 72, 482, 1, M3_ON_SURFACE_VAR, line);
+    draw_byline(&d, line, (int)sizeof line, 72, 482, 860, now);
     if (now->album[0]) {
       fit(line, (int)sizeof line, now->album, 1, 860);
       draw_text(&d, 72, 522, 1, M3_OUTLINE, line);
@@ -1290,9 +1394,7 @@ static void paint(void) {
       draw_track_art(&d, 1016, y, 64, &g_queue[idx]);
       fit(line, (int)sizeof line, g_queue[idx].title, 1, 680);
       draw_text(&d, 1096, y + 4, 1, M3_ON_SURFACE, line);
-      subline(line, (int)sizeof line, &g_queue[idx]);
-      fit(line, (int)sizeof line, line, 1, 480);
-      draw_text(&d, 1096, y + 36, 1, M3_ON_SURFACE_VAR, line);
+      draw_byline(&d, line, (int)sizeof line, 1096, y + 36, 480, &g_queue[idx]);
     }
     draw_hints(&d);
     present(&d);
@@ -1350,14 +1452,14 @@ static void paint(void) {
       int y = 104;
       int focus = (g_zone == ZONE_BODY);
       const char *place = ytm_home_place();
-      if (!ytm_signed_in() && place && place[0]) {
+      if ((!ytm_signed_in() || ytm_home_note()[0]) && place && place[0]) {
         snprintf(line, sizeof line, "Charts · %s", place);
         draw_text(&d, x0, 16, 2, M3_ON_SURFACE, line);
       } else {
         draw_text(&d, x0, 16, 2, M3_ON_SURFACE, "For you");
       }
       if (g_status[0]) {
-        fit(line, (int)sizeof line, g_status, 1, 500);
+        fit(line, (int)sizeof line, g_status, 1, 1000);
         draw_text(&d, 1920 - 40 - text_px(line, 1), 28, 1, M3_ERROR, line);
       }
       draw_text(&d, x0, 72, 1, M3_PRIMARY, ytm_home_song_heading());
@@ -1477,6 +1579,16 @@ static void paint(void) {
       const char *rows[] = {"Sign out"};
       draw_text(&d, RAIL + 28, 108, 1, M3_ON_SURFACE_VAR, "YouTube Music is linked to this console");
       {
+        const char *how;
+        if (ytm_token_custom())
+          how = "Signed in with your OAuth client. Home shows your recommendations.";
+        else if (ytm_oauth_client_set())
+          how = "Sign out and in again to use your OAuth client for Home.";
+        else
+          how = "Home is public picks. Add oauth_client.txt for your own (see README).";
+        draw_text(&d, RAIL + 28, 260, 1, M3_OUTLINE, how);
+      }
+      {
         int y = 180;
         int sel = (g_zone == ZONE_BODY);
         fill_round(&d, RAIL + 28, y, 280, 56, 28, sel ? 147 : 57, sel ? 0 : 51, sel ? 10 : 50);
@@ -1509,9 +1621,7 @@ static void paint(void) {
       draw_track_art(&d, RAIL + 36, y, 84, &list[idx]);
       fit(line, (int)sizeof line, list[idx].title, 1, 1100);
       draw_text(&d, RAIL + 140, y + 8, 1, M3_ON_SURFACE, line);
-      subline(line, (int)sizeof line, &list[idx]);
-      fit(line, (int)sizeof line, line, 1, 900);
-      draw_text(&d, RAIL + 140, y + 46, 1, M3_ON_SURFACE_VAR, line);
+      draw_byline(&d, line, (int)sizeof line, RAIL + 140, y + 46, 900, &list[idx]);
       if (list[idx].seconds > 0) {
         fmt_time(time, (int)sizeof time, list[idx].seconds);
         draw_text(&d, RAIL + 1420, y + 24, 1, M3_ON_SURFACE_VAR, time);
@@ -1531,9 +1641,9 @@ static void paint(void) {
     draw_track_art(&d, 36, BAR_Y + 18, 72, now);
     fit(line, (int)sizeof line, now->title, 1, 400);
     draw_text(&d, 124, BAR_Y + 20, 1, M3_ON_SURFACE, line);
-    if (now->video && sub[0])
+    if (now->kind == YTM_KIND_VIDEO && sub[0])
       snprintf(line, sizeof line, "Video · %s", sub);
-    else if (now->video)
+    else if (now->kind == YTM_KIND_VIDEO)
       snprintf(line, sizeof line, "Video");
     else
       snprintf(line, sizeof line, "%s", sub);
@@ -1595,8 +1705,17 @@ static void poll_input(void) {
   int dx = 0, dy = 0;
   while (SDL_PollEvent(&e)) {
     if (e.type == SDL_QUIT) g_run = 0;
-    if (e.type == SDL_CONTROLLERDEVICEADDED && !g_pad)
+    if (e.type == SDL_CONTROLLERDEVICEADDED && !g_pad) {
       g_pad = SDL_GameControllerOpen(e.cdevice.which);
+      memset(g_prev, 0, sizeof g_prev);
+    }
+    /* The DualSense sleeps or loses power; keep the dead handle and the next pad is ignored. */
+    if (e.type == SDL_CONTROLLERDEVICEREMOVED && g_pad &&
+        e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad))) {
+      SDL_GameControllerClose(g_pad);
+      g_pad = NULL;
+      g_hold = 0;
+    }
     if (e.type == SDL_TEXTINPUT && g_body == BODY_SEARCH && !g_player_ui) {
       const char *t = e.text.text;
       if (t && t[0] >= 32 && t[0] < 127 && (int)strlen(g_query) + 1 < (int)sizeof g_query) {
@@ -1618,6 +1737,11 @@ static void poll_input(void) {
         } else on_back();
       } else if (k == SDLK_f) g_player_ui = !g_player_ui;
     }
+  }
+  if (g_pad && !SDL_GameControllerGetAttached(g_pad)) {
+    SDL_GameControllerClose(g_pad);
+    g_pad = NULL;
+    g_hold = 0;
   }
   if (!g_pad) {
     for (int i = 0; i < SDL_NumJoysticks(); i++) {
@@ -1682,8 +1806,6 @@ static void poll_input(void) {
     g_trig_l = 0;
     g_trig_r = 0;
   }
-  /* Keep d-pad edges honest even when we drive movement from hold_dir. */
-  (void)SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
   hold_dir(dx, dy);
 }
 
