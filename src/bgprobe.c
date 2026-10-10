@@ -36,6 +36,10 @@ int sceSystemServiceIsBgmCpuBudgetAvailable(void);
 int sceSystemStateMgrEnterMediaPlaybackMode(void);
 int sceSystemStateMgrLeaveMediaPlaybackMode(void);
 int sceSystemStateMgrTickMusicPlayback(void);
+/* The BGM ("background music") budget: what a media app asks for before the system starts its
+ * music core. Arguments unknown; probed with 0 and 1. */
+int sceSystemServiceAcquireBgmCpuBudget(int type);
+int sceShellCoreUtilIsBgmCpuBudgetAcquired(void);
 
 #define GOT(sym)                                                     \
   ({                                                                 \
@@ -50,6 +54,8 @@ static int (*p_bgm_budget)(void);
 static int (*p_enter_media)(void);
 static int (*p_leave_media)(void);
 static int (*p_tick_music)(void);
+static int (*p_acquire)(int);
+static int (*p_acquired)(void);
 
 typedef struct {
   char unused[45];
@@ -128,6 +134,10 @@ static void resolve(void) {
                                        GOT(sceSystemStateMgrLeaveMediaPlaybackMode));
   p_tick_music = (int (*)(void))check("sceSystemStateMgrTickMusicPlayback",
                                       GOT(sceSystemStateMgrTickMusicPlayback));
+  p_acquire = (int (*)(int))check("sceSystemServiceAcquireBgmCpuBudget",
+                                  GOT(sceSystemServiceAcquireBgmCpuBudget));
+  p_acquired = (int (*)(void))check("sceShellCoreUtilIsBgmCpuBudgetAcquired",
+                                    GOT(sceShellCoreUtilIsBgmCpuBudgetAcquired));
 }
 
 static int bgm_playing(void) { return p_bgm_playing ? p_bgm_playing() : -1; }
@@ -226,27 +236,38 @@ static void run_one(int round, int m, int fg) {
   sleep(2);
 }
 
+/* v4: Spotify's music core is started by the system right after its app asks for something;
+ * the BGM CPU budget is the likeliest request. Ask for it and see whether eboot2.bin starts
+ * (it posts its own "ytmcore" notifications). The tone tests are kept for later rounds. */
 static void *probe_main(void *arg) {
-  int fg = -1;
-  int rc = -1;
+  int rc;
   (void)arg;
   mkdir("/data/ytmusic", 0777);
   g_log = fopen("/data/ytmusic/bgprobe.log", "w");
   g_sum[0] = 0;
-  note("bgprobe v3 started");
+  note("bgprobe v4 started");
   resolve();
-  if (p_fg_user) rc = p_fg_user(&fg);
-  note("foreground user 0x%08x user=%d", (unsigned)rc, fg);
-  note("AudioOutInit 0x%08x (0x8026000e: SDL already did)", (unsigned)sceAudioOutInit());
-  note("before: bgm playing %d, bgm budget %d", bgm_playing(), bgm_budget());
-  say("Background audio test: press PS and go to the home screen now. Tones start in 15 seconds.");
-  sleep(15);
-  for (int round = 1; round <= 2; round++)
-    for (int m = 0; m < NMETHODS; m++) run_one(round, m, fg);
-  say("Background audio test done.\n%s", g_sum);
+  note("before: budget available %d, acquired %d", bgm_budget(),
+       p_acquired ? p_acquired() : -1);
+  if (p_acquire) {
+    rc = p_acquire(0);
+    note("AcquireBgmCpuBudget(0) -> 0x%08x", (unsigned)rc);
+    sum("acquire(0) %08x\n", (unsigned)rc);
+    if (rc < 0) {
+      rc = p_acquire(1);
+      note("AcquireBgmCpuBudget(1) -> 0x%08x", (unsigned)rc);
+      sum("acquire(1) %08x\n", (unsigned)rc);
+    }
+  }
+  sleep(2);
+  note("after: budget available %d, acquired %d", bgm_budget(), p_acquired ? p_acquired() : -1);
+  sum("acquired now %d\n", p_acquired ? p_acquired() : -1);
+  say("BG test v4: asked for the background music budget.\n%sWatch for ytmcore notifications.",
+      g_sum);
   if (g_log) fclose(g_log);
   g_log = NULL;
   g_running = 0;
+  (void)run_one;
   return NULL;
 }
 

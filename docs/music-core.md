@@ -50,6 +50,23 @@ Slots 24, 25, 26, 32 and 42 return constants, and others return a bool, int or d
 
 The web UI controls the core through Spotify Connect (a Zeroconf HTTP server inside the core, plus Spotify's cloud), so app-to-core control is a socket.
 
+## How the system starts it (Spotify kernel log)
+
+About a second after Spotify's app shows its first frame, ShellCore does:
+
+```
+[PSM] Got handle=0x3 from AppId=0xa018
+[SceLncService] launchApp(NPXS40201)
+[SceLncService] appType={SCE_LNC_APP_TYPE_DAEMON} contentVersion={01.020.000} appCategoryType={0x02000100}
+  ... mounts the app's own package as app0, sandboxType 2 ...
+[MusicPlayerService][INFO] setCustomMusicCoreStatus: changed CustomMusicCoreStatus INACTIVE -> ACTIVE
+EXEC /app0/eboot2.bin [user] ... abi=native category=custom_music_core
+```
+
+From then on, the process `NPXS40201 CustomMusicCore` stays up while Spotify is suspended in a game.
+
+Our native media app with the same `musicCore*` lines gets "MusicPlayerService: MediaApp launch start." but no `launchApp(NPXS40201)`. Something the app does has to ask for the core. Spotify's process runs the system web runtime, so whatever it calls is available to an app process. The likeliest call is `sceSystemServiceAcquireBgmCpuBudget`; the bgprobe v4 test checks that.
+
 ## Status
 
 `src/musiccore.c` is a test core with this exact shape. It logs every callback as `ytmcore:` in the kernel log and plays a pulsed tone when the system starts it. Still unknown:
