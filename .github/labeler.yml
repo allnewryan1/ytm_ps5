@@ -1,26 +1,18 @@
 ui:
   - changed-files:
-      - any-glob-to-any-file: ["src/main.c", "src/text.c", "src/text.h", "src/font8x8_basic.h"]
+      - any-glob-to-any-file: ["src/main.c", "src/text.*", "src/ui_font.h", "src/art.*"]
 
 audio:
   - changed-files:
-      - any-glob-to-any-file: ["src/player.c", "src/player.h"]
+      - any-glob-to-any-file: ["src/player.*"]
 
 network:
   - changed-files:
-      - any-glob-to-any-file: ["src/net.c", "src/net.h"]
-
-playback:
-  - changed-files:
-      - any-glob-to-any-file: ["src/player.c", "src/main.c"]
-
-library:
-  - changed-files:
-      - any-glob-to-any-file: ["src/main.c"]
+      - any-glob-to-any-file: ["src/net.*"]
 
 documentation:
   - changed-files:
-      - any-glob-to-any-file: ["*.md", "README.md", "CHANGELOG.md"]
+      - any-glob-to-any-file: ["**/*.md", "NOTICE"]
 
 ci:
   - changed-files:

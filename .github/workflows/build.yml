@@ -1,14 +1,7 @@
-# YouTube Music PS5 CI
-#
-# Same idea as EVO Player's build.yml: the runner uses this repo's Dockerfile
-# with the same pinned LLVM 18 / Payload SDK v0.42 / pacbrew v0.39, then
-# proves the payload still links. A GitHub runner has no PS5, so nothing here
-# sends an ELF to a console.
+# Builds ytmusic.elf and the PPSA99105 homebrew folder in this repository's Docker image
+# (Ubuntu 24.04, LLVM 18, PS5 Payload SDK v0.42, pacbrew v0.39) and checks the output.
+# CI has no console, so nothing runs on hardware. release.yml publishes a green main build.
 name: build
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 on:
   push:
@@ -19,27 +12,34 @@ on:
     paths-ignore: ["**/*.md"]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   LLVM_VERSION: "18"
   PS5_SDK_VERSION: "v0.42"
   PACBREW_VERSION: "v0.39"
+  IMAGE: ytm-ps5/dev:ci
 
 jobs:
-  build-image:
-    name: Build dev image
+  build:
+    name: Build ytmusic.elf and PPSA99105
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@v4
 
-      - name: Build image with layer cache
+      - name: Build the SDK image
         uses: docker/build-push-action@v7
         with:
           context: .
           load: true
-          tags: ytm-ps5/dev:ci
+          tags: ${{ env.IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -47,70 +47,37 @@ jobs:
             PS5_SDK_VERSION=${{ env.PS5_SDK_VERSION }}
             PACBREW_VERSION=${{ env.PACBREW_VERSION }}
 
-      - name: Export image
-        run: docker save ytm-ps5/dev:ci | gzip -1 > /tmp/ytm-image.tar.gz
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: docker-image
-          path: /tmp/ytm-image.tar.gz
-          retention-days: 1
-
-  build-payload:
-    name: Build ytmusic.elf
-    needs: build-image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: docker-image
-          path: /tmp
-      - run: docker load < /tmp/ytm-image.tar.gz
-
-      - name: Encode launcher backgrounds
+      - name: Encode launcher images
         run: |
           sh scripts/decode-assets.sh
           python3 -m pip install --user pillow numpy
           python3 scripts/encode-bc7.py sce_sys/background-source.jpg sce_sys/pic0.dds
           python3 scripts/encode-bc7.py sce_sys/launch-background-source.jpg sce_sys/pic1.dds
 
-      - name: make
+      - name: Build and check
         run: |
-          docker run --rm -v "$PWD:/workspace" -w /workspace \
-            ytm-ps5/dev:ci bash -lc 'make && make package'
+          docker run --rm -v "$PWD:/workspace" -w /workspace "$IMAGE" bash -lc '
+            set -eu
+            make
+            make package
+            app=dist/PPSA99105
+            file ytmusic.elf | grep -q "ELF 64-bit LSB.*x86-64" || { echo "not an x86-64 ELF"; exit 1; }
+            if llvm-readelf -l ytmusic.elf | grep -q /lib64/ld-linux; then
+              echo "links the host loader: built with the wrong compiler"; exit 1
+            fi
+            llvm-readelf -h ytmusic.elf | grep -qE "Type:.*(DYN|EXEC)" || { echo "unexpected ELF type"; exit 1; }
+            for f in eboot.bin sce_module/libc.prx homebrew.js sce_sys/param.json sce_sys/icon0.png \
+                     sce_sys/pic0.dds sce_sys/pic1.dds; do
+              test -s "$app/$f" || { echo "missing $app/$f"; exit 1; }
+            done
+            test ! -e "$app/eboot.elf"
+            test "$(od -An -t x1 -N 4 "$app/eboot.bin" | tr -d "[:space:]")" = 4f153d1d
+            test "$(od -An -t x1 -N 4 "$app/sce_module/libc.prx" | tr -d "[:space:]")" = 5414f5ee
+            test "$(od -An -t x1 -j 16 -N 2 build/native/eboot.elf | tr -d "[:space:]")" = 10fe
+            echo "ytmusic.elf and $app check out"
+          '
 
-      - name: Validate ELF
-        run: |
-          docker run --rm -v "$PWD:/workspace" -w /workspace \
-            ytm-ps5/dev:ci bash -lc '
-              set -e
-              f=ytmusic.elf
-              file "$f" | grep -q "ELF 64-bit LSB.*x86-64" \
-                || { echo "not an x86-64 ELF"; exit 1; }
-              llvm-readelf -l "$f" | grep -q "/lib64/ld-linux" \
-                && { echo "links the HOST loader - built with the wrong compiler"; exit 1; }
-              llvm-readelf -h "$f" | grep -qE "Type:.*(DYN|EXEC)" \
-                || { echo "unexpected ELF type"; exit 1; }
-              test -f dist/PPSA99105/eboot.bin
-              test ! -e dist/PPSA99105/eboot.elf
-              test -f dist/PPSA99105/sce_module/libc.prx
-              test -f dist/PPSA99105/homebrew.js
-              test -f dist/PPSA99105/sce_sys/icon0.png
-              test -f dist/PPSA99105/sce_sys/pic0.dds
-              test -f dist/PPSA99105/sce_sys/pic1.dds
-              magic=$(od -An -t x1 -N 4 dist/PPSA99105/eboot.bin | tr -d "[:space:]")
-              test "$magic" = 4f153d1d
-              prx=$(od -An -t x1 -N 4 dist/PPSA99105/sce_module/libc.prx | tr -d "[:space:]")
-              test "$prx" = 5414f5ee
-              etype=$(od -An -t x1 -j 16 -N 2 build/native/eboot.elf | tr -d "[:space:]")
-              test "$etype" = 10fe
-              echo "native eboot type 0xfe10"
-              echo "validated $f"
-            '
-
-      - name: Archive payload
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: ytmusic-elf
           path: |
@@ -119,12 +86,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  lint:
+  shellcheck:
     name: Shell lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: shellcheck
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+      - run: |
+          command -v shellcheck >/dev/null || sudo apt-get install -y -qq shellcheck
           shellcheck -e SC1091 -S warning scripts/*.sh

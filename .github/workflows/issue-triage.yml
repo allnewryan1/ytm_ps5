@@ -1,55 +1,39 @@
-name: Issue Triage & Auto-Labeler
+# Labels a new issue from words in its title (and, for audio, its body).
+name: issue triage
 
 on:
   issues:
-    types: [opened, edited]
+    types: [opened]
 
 permissions:
   issues: write
-  contents: read
 
 jobs:
   triage:
     runs-on: ubuntu-latest
     steps:
-      - name: Auto-Label Issue by Title & Content
-        uses: actions/github-script@v9
+      - uses: actions/github-script@v9
         with:
           script: |
             const title = context.payload.issue.title.toLowerCase();
             const body = (context.payload.issue.body || '').toLowerCase();
-            const labelsToAdd = new Set();
-
-            if (title.includes('[bug]') || title.includes('bug:') || title.includes('crash') || title.includes('error')) {
-              labelsToAdd.add('bug');
-            }
-            if (title.includes('[feature]') || title.includes('feat:') || title.includes('[enhancement]')) {
-              labelsToAdd.add('enhancement');
-            }
-            if (title.includes('[docs]') || title.includes('doc:') || title.includes('readme')) {
-              labelsToAdd.add('documentation');
-            }
-            if (title.includes('audio') || title.includes('sound') || title.includes('ffmpeg') || body.includes('audio')) {
-              labelsToAdd.add('audio');
-            }
-            if (title.includes('http') || title.includes('search') || title.includes('innertube') || title.includes('network')) {
-              labelsToAdd.add('network');
-            }
-            if (title.includes('ui') || title.includes('menu') || title.includes('keyboard') || title.includes('focus')) {
-              labelsToAdd.add('ui');
-            }
-            if (title.includes('playback') || title.includes('decode') || title.includes('stream')) {
-              labelsToAdd.add('playback');
-            }
-            if (title.includes('library') || title.includes('liked')) {
-              labelsToAdd.add('library');
-            }
-
-            if (labelsToAdd.size > 0) {
+            // Whole words only: a bare substring test put "ui" on "build" and "quit".
+            const has = (text, words) => words.some((w) => new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`).test(text));
+            const rules = [
+              ['bug', has(title, ['\\[bug\\]', 'bug', 'crash', 'crashes', 'error', 'freeze', 'freezes'])],
+              ['enhancement', has(title, ['\\[feature\\]', 'feat', 'feature', '\\[enhancement\\]'])],
+              ['documentation', has(title, ['\\[docs\\]', 'docs?', 'readme'])],
+              ['audio', has(title, ['audio', 'sound', 'volume', 'ffmpeg']) || has(body, ['audio', 'sound'])],
+              ['network', has(title, ['http', 'network', 'innertube', 'search', '400', '403'])],
+              ['ui', has(title, ['ui', 'menu', 'keyboard', 'focus', 'controller', 'dualsense', 'art'])],
+              ['playback', has(title, ['playback', 'decode', 'stream', 'queue', 'seek', 'skips?'])],
+              ['library', has(title, ['library', 'liked', 'playlists?'])],
+            ];
+            const labels = rules.filter(([, hit]) => hit).map(([name]) => name);
+            if (labels.length) {
               await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                ...context.repo,
                 issue_number: context.payload.issue.number,
-                labels: Array.from(labelsToAdd)
+                labels,
               });
             }

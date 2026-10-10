@@ -1,12 +1,13 @@
-# Adds new / reopened / transferred issues to a GitHub Project.
-# Skipped until both of these exist:
-#   repo variable ROADMAP_PROJECT_URL = https://github.com/users/<you>/projects/<n>
-#   repo secret   ADD_TO_PROJECT_PAT  = a token with Projects read/write
-name: Add issues to the roadmap project
+# Adds new, reopened and transferred issues to a GitHub Project. Off until both exist:
+#   repository variable ROADMAP_PROJECT_URL  e.g. https://github.com/users/<you>/projects/<n>
+#   repository secret   ADD_TO_PROJECT_PAT   a token with Projects read/write
+name: add to project
 
 on:
   issues:
     types: [opened, reopened, transferred]
+
+permissions: {}
 
 jobs:
   add-to-project:
