@@ -3,10 +3,10 @@
 
 /* The background payload (ytmusicd). See ytmd.h for its lifecycle. */
 
-/* Deploy it through the ELF loader if it is not running, then connect. 0 when connected.
- * Blocks for up to about six seconds while a new daemon starts. */
+/* Deploy it through the ELF loader and keep the loader connection as its channel. 0 when it
+ * answered. Blocks for up to about six seconds while the loader starts it. */
 int ytmd_start(void);
-/* Call every frame. Pings every two seconds and restarts a daemon that died (a few times). */
+/* Call every frame. Pings every two seconds and redeploys a daemon that died (a few times). */
 void ytmd_tick(void);
 /* Tell it to quit and disconnect. A force-closed app needs no call: the daemon sees the
  * connection close and exits on its own. */

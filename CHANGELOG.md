@@ -2,9 +2,10 @@
 
 ## 0.10.0
 
-- The app starts a small background player, ytmusicd, by sending it to the ELF loader on port 9021 (etaHEN or elfldr). No extra file or setup. It runs in its own process, so it keeps running while the app is suspended for a game. Quit stops it, and so does force closing the app: it exits as soon as its connection to the app closes. A copy that was started but never reached by the app exits after 15 seconds.
-- Account shows the background player's state. Without an ELF loader the app works exactly as before.
-- The background player is hardened the way PS5SX2 and ps5upload harden theirs. A crash exits at once instead of falling to a core dump, which on 13.60 can wedge a payload until reboot. Its thread is named `ytmusicd`, and a new copy ends a stale or wedged one by that name before taking the port. Shutdown is bounded. The previous run's log is kept as `daemon.prev.log`. The loader send is one write and a half-close, because a loader left waiting on a quiet client stops answering.
+- The app starts a small background player, ytmusicd, by sending it to the ELF loader on port 9021 (etaHEN or elfldr). No extra file or setup. It runs in its own process, so it keeps running while the app is suspended for a game.
+- The app keeps the loader connection, which the loader hands to the daemon. That connection is their only channel, as ProsperoStore's file worker uses it: the daemon has no port, can only talk to the app that started it, and exits when the app quits or the connection ends, which the kernel guarantees when the app is force closed.
+- A crash exits at once instead of falling to a core dump, which on 13.60 can wedge a payload until reboot (ps5upload). The daemon names its thread `ytmusicd` and ends any older copy at start, so there is only ever one. Shutdown is bounded, and the previous run's log is kept as `daemon.prev.log`.
+- Account shows the background player's state. Without an ELF loader, or with one that does not pass the connection on, the app works exactly as before.
 - The background player does not play audio yet. Playback moves into it once the audio probe (`make probe`, `tools/audioprobe.c`) confirms which audio output stays audible during a game.
 
 ## 0.9.1

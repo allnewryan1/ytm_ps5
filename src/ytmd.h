@@ -3,11 +3,15 @@
 
 /* Protocol between the app and ytmusicd, the background payload.
  *
- * The app sends the daemon ELF to the ELF loader (127.0.0.1:9021), connects to the daemon on
- * 127.0.0.1:YTMD_PORT and says HELLO with its pid. The daemon serves one app at a time and
- * exits when that app sends QUIT, closes the connection (the kernel closes it when the app
- * is force closed), or no longer exists. A suspended app keeps its connection, so silence is
- * never a reason to exit: music must keep playing while a game has focus.
+ * The app sends the daemon ELF to the ELF loader on 127.0.0.1:9021 and keeps that connection.
+ * The loader reads exactly the ELF, starts it in its own process and hands it the rest of the
+ * connection as its stdin and stdout (as ProsperoStore's file worker and PS5SX2's relay use it).
+ * That connection is the only channel: no port of its own, so nothing to collide with, nothing
+ * stale to find, and the daemon can only ever talk to the app that started it.
+ *
+ * The daemon exits when the app sends QUIT (the Quit option) or the connection ends: the
+ * kernel closes it when the app is force closed or crashes. A suspended app keeps it open, so
+ * silence is never a reason to exit: music must keep playing while a game has focus.
  *
  * Every message is a YtmdHdr and len bytes of body. Every request gets one reply whose rc is
  * 0 or a negative error. Both ends are the same build, so structs go over the wire as is. */
@@ -18,7 +22,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define YTMD_PORT 47330
 #define YTMD_LOADER_PORT 9021
 #define YTMD_MAGIC 0x444d5459u /* "YTMD" */
 #define YTMD_VERSION 1
@@ -28,7 +31,7 @@
 #define YTMD_THREAD_NAME "ytmusicd"
 
 enum {
-  YTMD_HELLO = 1, /* YtmdHello -> YtmdHello */
+  YTMD_HELLO = 1, /* YtmdHello -> YtmdHello. The app's first message, right after the ELF. */
   YTMD_PING = 2,  /* -> nothing */
   YTMD_QUIT = 3,  /* -> nothing, then the daemon exits */
   /* The playback engine's commands (start, pause, seek, volume, status, queue) go here. */

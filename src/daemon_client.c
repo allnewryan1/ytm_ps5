@@ -1,9 +1,9 @@
 /* App side of ytmusicd: deploy it, keep the connection, stop it on Quit.
  *
  * The daemon ELF is embedded in the app (daemon_blob.S). ytmd_start() sends it to the ELF
- * loader on 127.0.0.1:9021, which runs it in its own process, then connects and says HELLO.
- * The connection is what ties the two together: when the app is force closed the kernel
- * closes it and the daemon exits. ytmd_stop() is the clean path for the Quit option. */
+ * loader on 127.0.0.1:9021 and keeps that connection, which the loader hands to the daemon:
+ * it is the only channel and what ties the two together. When the app is force closed the
+ * kernel closes it and the daemon exits. ytmd_stop() is the clean path for the Quit option. */
 
 #include "daemon_client.h"
 #include "ytmd.h"
@@ -34,11 +34,6 @@ static long long now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-static void nap_ms(int ms) {
-  struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
-  nanosleep(&ts, NULL);
 }
 
 /* Connect to 127.0.0.1:port within timeout_ms. A blocking socket with 1 s I/O timeouts. */
@@ -103,9 +98,36 @@ static void drop(void) {
   g_pid = 0;
 }
 
-static int adopt(int fd) {
-  int pid = hello(fd);
-  if (pid <= 0) return -1;
+/* Send the daemon to the loader and keep the connection: the loader reads exactly the ELF and
+ * hands the rest of the connection to the daemon as its stdin and stdout. Never connect without
+ * sending, and send in one go: stock elfldr serves one connection at a time and waits forever on
+ * a client that goes quiet mid-send (ps5upload's elfldr_guard.rs). */
+static int deploy(void) {
+  size_t n = (size_t)(ytm_daemon_elf_end - ytm_daemon_elf);
+  struct timeval tv = {(DEPLOY_WAIT_MS / 1000), 0};
+  int fd = connect_local(YTMD_LOADER_PORT, 1500);
+  int pid;
+  if (fd < 0) {
+    snprintf(g_status, sizeof g_status, "No ELF loader on port %d", YTMD_LOADER_PORT);
+    return -1;
+  }
+  if (n < 64 || ytmd_send_all(fd, ytm_daemon_elf, n) != 0) {
+    close(fd);
+    snprintf(g_status, sizeof g_status, "Could not send the background player");
+    return -1;
+  }
+  /* The first reply has to wait for the loader to start the daemon. */
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  pid = hello(fd);
+  if (pid <= 0) {
+    /* No reply: the loader refused it (its error text comes back here instead), or it is a
+     * loader that does not pass the connection on to the payload. */
+    close(fd);
+    snprintf(g_status, sizeof g_status, "The ELF loader did not start the background player");
+    return -1;
+  }
+  tv.tv_sec = 1;
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
   g_fd = fd;
   g_pid = pid;
   g_next_ping = now_ms() + PING_MS;
@@ -113,60 +135,9 @@ static int adopt(int fd) {
   return 0;
 }
 
-/* Ask whatever owns the daemon port to quit, and wait until the port is free. */
-static void retire(int fd) {
-  call(fd, YTMD_QUIT, NULL, 0, NULL, 0);
-  close(fd);
-  for (int i = 0; i < 20; i++) {
-    int probe = connect_local(YTMD_PORT, 100);
-    if (probe < 0) return;
-    close(probe);
-    nap_ms(100);
-  }
-}
-
-static int deploy(void) {
-  size_t n = (size_t)(ytm_daemon_elf_end - ytm_daemon_elf);
-  int fd = connect_local(YTMD_LOADER_PORT, 1500);
-  if (fd < 0) {
-    snprintf(g_status, sizeof g_status, "No ELF loader on port %d", YTMD_LOADER_PORT);
-    return -1;
-  }
-  /* The loader reads exactly one ELF, sized from its headers, then starts it. */
-  /* The loader serves one connection at a time and stock elfldr waits forever on a client that
-   * goes quiet mid-send (ps5upload's elfldr_guard.rs), so never connect without sending, send
-   * in one go, and half-close at once: the end of stream is what tells some loaders to run it. */
-  if (n < 64 || ytmd_send_all(fd, ytm_daemon_elf, n) != 0) {
-    close(fd);
-    snprintf(g_status, sizeof g_status, "Could not send the background player");
-    return -1;
-  }
-  shutdown(fd, SHUT_WR);
-  close(fd);
-  return 0;
-}
-
 int ytmd_start(void) {
-  int fd;
-  long long until;
   if (g_fd >= 0) return 0;
-  fd = connect_local(YTMD_PORT, 300);
-  if (fd >= 0) {
-    /* A daemon from this build is reused. Anything else on the port is told to quit. */
-    if (adopt(fd) == 0) return 0;
-    retire(fd);
-  }
-  if (deploy() != 0) return -1;
-  until = now_ms() + DEPLOY_WAIT_MS;
-  while (now_ms() < until) {
-    nap_ms(100);
-    fd = connect_local(YTMD_PORT, 200);
-    if (fd < 0) continue;
-    if (adopt(fd) == 0) return 0;
-    close(fd);
-  }
-  snprintf(g_status, sizeof g_status, "Background player did not start");
-  return -1;
+  return deploy();
 }
 
 void ytmd_tick(void) {

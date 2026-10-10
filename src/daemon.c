@@ -1,21 +1,16 @@
 /* ytmusicd: the background payload the app starts through the ELF loader.
  *
  * It lives in its own process, so it keeps running when the app is suspended because a game
- * took focus. Today it only proves the lifecycle: the app deploys it, connects, and it exits
- * with the app. The playback engine moves in here once background audio is confirmed.
+ * took focus. Today it only proves the lifecycle: the app deploys it and it exits with the app.
+ * The playback engine moves in here once background audio is confirmed.
  *
- * It exits when
- *   - the app sends QUIT (the Quit option),
- *   - the app's connection closes (the kernel closes it when the app is force closed or crashes),
- *   - the app's process no longer exists (a backstop if the close is never delivered),
- *   - no app says HELLO within ORPHAN_SECS of launch (deployed, but the app died first).
- * It never exits for silence: a suspended app sends nothing but must keep its music. */
+ * Its only channel is the loader connection it inherits as stdin/stdout (see ytmd.h). It exits
+ * when the app sends QUIT or that connection ends, which the kernel guarantees when the app is
+ * force closed. It never exits for silence: a suspended app sends nothing but keeps its music. */
 
 #include "ytmd.h"
 
-#include <arpa/inet.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -37,9 +32,7 @@
 #define LOG_DIR "/data/ytmusic"
 #define LOG_PATH LOG_DIR "/daemon.log"
 #define LOG_PREV LOG_DIR "/daemon.prev.log"
-#define ORPHAN_SECS 15
-#define HELLO_SECS 5
-#define PID_CHECK_MS 2000
+#define HELLO_SECS 10
 #define EXIT_WATCHDOG_SECS 5
 
 /* Every thread names itself this, first thing (YTMD_THREAD_NAME): the loader calls every raw
@@ -70,8 +63,19 @@ static long long now_ms(void) {
   return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* The loader hands us its client socket as stdin, stdout and stderr. That socket closes as
- * soon as the app has sent us, and a write to it would then raise SIGPIPE and kill us. */
+/* The loader hands us the app's connection as stdin, stdout and stderr. Take it to a
+ * descriptor of its own, then point stdio at /dev/null and the log: a stray printf must never
+ * land in the protocol stream. Returns the channel, or -1. */
+static int take_channel(void) {
+  int ch = dup(STDIN_FILENO);
+  struct stat st;
+  if (ch >= 0 && (fstat(ch, &st) != 0 || !S_ISSOCK(st.st_mode))) {
+    close(ch);
+    ch = -1;
+  }
+  return ch;
+}
+
 static void detach_stdio(void) {
   int nul = open("/dev/null", O_RDWR);
   int lf;
@@ -111,9 +115,9 @@ static void trap_fatal_signals(void) {
 }
 
 
-/* SIGKILL every other ytmusicd and wait (bounded) until each is gone. The app only deploys a new
- * daemon after the one on the port failed to answer or was from another build, so anything
- * still holding the port is stale or wedged. Returns how many were ended. */
+/* SIGKILL every other ytmusicd and wait (bounded) until each is gone. A new one belongs to the
+ * app that just started, so any other is left from a crash or wedged (a core-dumped process can
+ * outlive its app). Returns how many were ended. */
 #ifdef __PROSPERO__
 /* Whether a thread name is one of ours: "ytmusicd", or "ytmusicd-<role>" for worker threads.
  * Exact, so nothing that merely starts with the same letters is ever killed. */
@@ -184,157 +188,86 @@ static void quiet_socket(int fd) {
   (void)one;
 }
 
-static int listen_local(void) {
-  struct sockaddr_in sa;
-  int one = 1;
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-  memset(&sa, 0, sizeof sa);
-  sa.sin_family = AF_INET;
-  sa.sin_port = htons(YTMD_PORT);
-  sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 || listen(fd, 4) != 0) {
-    close(fd);
-    return -1;
-  }
-  return fd;
-}
+enum { KEEP = 0, EXIT = 1 };
 
-typedef struct {
-  int fd;
-  int hello;          /* this client said HELLO */
-  pid_t pid;          /* its process */
-  long long deadline; /* say HELLO by then */
-} Client;
-
-enum { KEEP = 0, DROP = 1, EXIT = 2 };
-
-/* One request. KEEP serves on, DROP closes this client, EXIT ends the daemon. */
-static int serve_one(Client *c) {
+/* One request. KEEP serves on, EXIT ends the daemon (QUIT, the connection ended, or garbage). */
+static int serve_one(int ch, int *hello) {
   YtmdHdr h;
   union {
     YtmdHello hello;
     char raw[YTMD_BODY_MAX];
   } body;
-  if (ytmd_recv_msg(c->fd, &h, &body, sizeof body) != 0) return c->hello ? EXIT : DROP;
+  if (ytmd_recv_msg(ch, &h, &body, sizeof body) != 0) {
+    logf_("the app's connection ended; exiting");
+    return EXIT;
+  }
+  if (!*hello && h.op != YTMD_HELLO) {
+    logf_("first message was op %u, not HELLO; exiting", h.op);
+    return EXIT;
+  }
   switch (h.op) {
     case YTMD_HELLO: {
       YtmdHello me;
-      if (h.len < sizeof(YtmdHello)) return DROP;
-      c->hello = 1;
-      c->pid = body.hello.pid;
+      if (h.len < sizeof(YtmdHello)) return EXIT;
+      *hello = 1;
       me.version = YTMD_VERSION;
       me.pid = getpid();
-      logf_("app pid %d connected (protocol %u)", (int)c->pid, body.hello.version);
-      return ytmd_send_msg(c->fd, h.op, 0, &me, sizeof me) == 0 ? KEEP : EXIT;
+      logf_("app pid %d connected (protocol %u)", (int)body.hello.pid, body.hello.version);
+      return ytmd_send_msg(ch, h.op, 0, &me, sizeof me) == 0 ? KEEP : EXIT;
     }
     case YTMD_PING:
-      return ytmd_send_msg(c->fd, h.op, 0, NULL, 0) == 0 ? KEEP : EXIT;
+      return ytmd_send_msg(ch, h.op, 0, NULL, 0) == 0 ? KEEP : EXIT;
     case YTMD_QUIT:
       logf_("quit requested");
-      ytmd_send_msg(c->fd, h.op, 0, NULL, 0);
+      ytmd_send_msg(ch, h.op, 0, NULL, 0);
       return EXIT;
     default:
-      return ytmd_send_msg(c->fd, h.op, -ENOSYS, NULL, 0) == 0 ? KEEP : EXIT;
+      return ytmd_send_msg(ch, h.op, -ENOSYS, NULL, 0) == 0 ? KEEP : EXIT;
   }
 }
 
 int main(void) {
-  Client c = {-1, 0, 0, 0};
-  long long orphan_at;
-  long long next_pid_check = 0;
-  int lfd;
+  int hello = 0;
+  long long hello_by;
+  int ch;
 
   name_thread(YTMD_THREAD_NAME);
+  ch = take_channel();
   detach_stdio();
   trap_fatal_signals();
-  lfd = listen_local();
-  if (lfd < 0) {
-    /* Bind first, before any other work, so the app's probe finds us as soon as possible.
-     * A port that is still held belongs to a stale or wedged ytmusicd: end it and retry. */
-    logf_("port %d busy (%s); taking over", YTMD_PORT, strerror(errno));
-    sweep_others();
-    for (int i = 0; i < 30 && lfd < 0; i++) {
-      usleep(100000);
-      lfd = listen_local();
-    }
-    if (lfd < 0) {
-      logf_("port %d still busy; exiting", YTMD_PORT);
-      return 0;
-    }
+  if (ch < 0) {
+    /* Started some other way (a loader that does not pass the connection on, or by hand). */
+    logf_("no app connection on stdin; exiting");
+    return 0;
   }
-  logf_("pid %d listening on 127.0.0.1:%d", (int)getpid(), YTMD_PORT);
-  orphan_at = now_ms() + ORPHAN_SECS * 1000;
+  quiet_socket(ch);
+  logf_("pid %d started", (int)getpid());
+  /* One ytmusicd at a time: the newest, which belongs to the app that just started. */
+  sweep_others();
+  hello_by = now_ms() + HELLO_SECS * 1000;
 
   for (;;) {
-    struct pollfd pf[2];
-    int n = 0;
-    long long t;
-    pf[n].fd = lfd;
-    pf[n].events = POLLIN;
-    pf[n++].revents = 0;
-    if (c.fd >= 0) {
-      pf[n].fd = c.fd;
-      pf[n].events = POLLIN;
-      pf[n++].revents = 0;
-    }
-    if (poll(pf, (nfds_t)n, 500) < 0 && errno != EINTR) {
+    struct pollfd pf;
+    int r;
+    pf.fd = ch;
+    pf.events = POLLIN;
+    pf.revents = 0;
+    r = poll(&pf, 1, 1000);
+    if (r < 0 && errno != EINTR) {
       logf_("poll: %s", strerror(errno));
       break;
     }
-    t = now_ms();
-
-    if (pf[0].revents & POLLIN) {
-      int nfd = accept(lfd, NULL, NULL);
-      if (nfd >= 0) {
-        quiet_socket(nfd);
-        /* The newest app wins. An older connection is a stale or hung app. */
-        if (c.fd >= 0) {
-          logf_("new app connection replaces pid %d", (int)c.pid);
-          close(c.fd);
-        }
-        c.fd = nfd;
-        c.hello = 0;
-        c.pid = 0;
-        c.deadline = t + HELLO_SECS * 1000;
-      }
-    }
-
-    if (c.fd >= 0 && n > 1 && (pf[1].revents & (POLLIN | POLLHUP | POLLERR))) {
-      int r = serve_one(&c);
-      if (r == EXIT) {
-        if (c.hello) logf_("app pid %d is gone or quit; exiting", (int)c.pid);
-        break;
-      }
-      if (r == DROP) {
-        close(c.fd);
-        c.fd = -1;
-      }
-    }
-
-    if (c.fd >= 0 && !c.hello && t > c.deadline) {
-      close(c.fd);
-      c.fd = -1;
-    }
-    if (c.fd < 0 && t > orphan_at) {
-      logf_("no app connected within %d s; exiting", ORPHAN_SECS);
+    if (r > 0 && serve_one(ch, &hello) == EXIT) break;
+    if (!hello && now_ms() > hello_by) {
+      logf_("no HELLO within %d s; exiting", HELLO_SECS);
       break;
-    }
-    if (c.fd >= 0 && c.hello && c.pid > 0 && t >= next_pid_check) {
-      next_pid_check = t + PID_CHECK_MS;
-      if (kill(c.pid, 0) != 0 && errno == ESRCH) {
-        logf_("app pid %d no longer exists; exiting", (int)c.pid);
-        break;
-      }
     }
   }
 
   /* Teardown is bounded: if anything hangs (the engine's threads, later), SIGALRM's default
    * action ends the process. */
   alarm(EXIT_WATCHDOG_SECS);
-  if (c.fd >= 0) close(c.fd);
-  close(lfd);
+  close(ch);
   logf_("stopped");
   return 0;
 }
