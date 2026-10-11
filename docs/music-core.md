@@ -78,6 +78,14 @@ Our native media app with the same `musicCore*` lines gets "MusicPlayerService: 
 - The system keeps a data folder for the core at `/system_data/music_core/NPXS40201/`. It was empty here.
 - Next: decrypt and read SceWebAppLauncher (`/web_app_launcher/eboot.bin`) to find what it checks before `launchApp(NPXS40201)`.
 
+## Other files in Spotify's package
+
+- `sce_sys/about/right.sprx` is the `libSceGameRight` module (built from `ppr/vsh/trunk/misc/game_right/right.prx`). It imports only `sceKernelMapNamedFlexibleMemory`, `sceKernelMunmap` and the stack guard.
+  - On load it maps 32 KB of named memory, "SceGameRight", and unpacks an ARZL-compressed blob into it with its own decoder.
+  - Its three exports return the version (4), a pointer to the text and the text's length (16,449 bytes).
+  - The text is legal notices: Sony's "Library programs" notice and the licences for LLVM libunwind, libc++, libcxxabi, compiler_rt, BSD libc and libm.
+  - Nothing in it relates to the music core or how it's started.
+
 ## Caution: NPXS40201 is shared
 
 `musicCoreTitleId` NPXS40201 is the system's music core slot, and Spotify uses it. Our test packages declared the same ID. After they were installed, Spotify stopped launching on the tester's console. Don't install test packages that claim NPXS40201 next to Spotify. Probe with Spotify removed, or find out how the slot is assigned first. From now on this project declares its core as `musicCoreTitleId` **NPXS40205**, in `meta/param.json` and `scripts/make-coretest.sh`. On the tester's console (FW 13.60), NPXS40205 isn't in use. Whether any other firmware or console uses it isn't known; there's no complete public list of title IDs to check against.
