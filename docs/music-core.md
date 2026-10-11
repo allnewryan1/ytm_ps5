@@ -80,7 +80,7 @@ Our native media app with the same `musicCore*` lines gets "MusicPlayerService: 
 
 ## Caution: NPXS40201 is shared
 
-`musicCoreTitleId` NPXS40201 is the system's music core slot, and Spotify uses it. Our test packages declared the same ID. After they were installed, Spotify stopped launching on the tester's console. Don't install test packages that claim NPXS40201 next to Spotify. Probe with Spotify removed, or find out how the slot is assigned first. `meta/param.json` no longer declares a music core.
+`musicCoreTitleId` NPXS40201 is the system's music core slot, and Spotify uses it. Our test packages declared the same ID. After they were installed, Spotify stopped launching on the tester's console. Don't install test packages that claim NPXS40201 next to Spotify. Probe with Spotify removed, or find out how the slot is assigned first. From now on this project declares its core as `musicCoreTitleId` **NPXS40205**, in `meta/param.json` and `scripts/make-coretest.sh`. Whether anything on the system already uses NPXS40205 is not known.
 
 ## Status
 

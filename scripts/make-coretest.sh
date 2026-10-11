@@ -3,14 +3,10 @@
 # Web Based Media App (category 66048) like Spotify, so the system web-app launcher runs it and
 # should start eboot2.bin as its music core. Run after `make package`.
 #
-# WARNING: musicCoreTitleId NPXS40201 is the system music core slot Spotify (PPSA05688) also
-# uses. Installing this package can break Spotify's background player until this package is
-# removed. Only run it with that understood: pass --i-understand-it-claims-npxs40201.
+# The core is declared as musicCoreTitleId NPXS40205, never NPXS40201 (Spotify's slot; claiming
+# it is suspected of breaking Spotify). Whether NPXS40205 is used by anything on the system is
+# not known.
 set -eu
-if [ "${1:-}" != "--i-understand-it-claims-npxs40201" ]; then
-    echo "refusing: this package claims Spotify's music core slot (see the header)" >&2
-    exit 2
-fi
 root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 src="$root/dist/PPSA99105"
 out="$root/dist/PPSA99106"
@@ -21,7 +17,7 @@ python3 - "$out/sce_sys/param.json" <<'PY'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
-d.update(musicCoreName="CustomMusicCore", musicCoreTitleId="NPXS40201", titleId="PPSA99106", contentId="UP9000-PPSA99106_00-YTMCORETEST00001", conceptId="99106",
+d.update(musicCoreName="CustomMusicCore", musicCoreTitleId="NPXS40205", titleId="PPSA99106", contentId="UP9000-PPSA99106_00-YTMCORETEST00001", conceptId="99106",
          applicationCategoryType=66048, webAppUri="https://example.com/",
          sdkVersion="0x1300000000000000", requiredSystemSoftwareVersion="0x1360000000000000")
 d["localizedParameters"]["en-US"]["titleName"] = "YTM core test"
