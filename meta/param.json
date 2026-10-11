@@ -26,8 +26,6 @@
     }
   },
   "masterVersion": "01.00",
-  "musicCoreName": "CustomMusicCore",
-  "musicCoreTitleId": "NPXS40201",
   "pubtools": {
     "creationDate": "2026-10-08 00:00:00",
     "loudnessSnd0": "-28.00",

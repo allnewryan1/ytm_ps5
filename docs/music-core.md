@@ -78,6 +78,10 @@ Our native media app with the same `musicCore*` lines gets "MusicPlayerService: 
 - The system keeps a data folder for the core at `/system_data/music_core/NPXS40201/`. It was empty here.
 - Next: decrypt and read SceWebAppLauncher (`/web_app_launcher/eboot.bin`) to find what it checks before `launchApp(NPXS40201)`.
 
+## Caution: NPXS40201 is shared
+
+`musicCoreTitleId` NPXS40201 is the system's music core slot, and Spotify uses it. Our test packages declared the same ID. After they were installed, Spotify stopped launching on the tester's console. Don't install test packages that claim NPXS40201 next to Spotify. Probe with Spotify removed, or find out how the slot is assigned first. `meta/param.json` no longer declares a music core.
+
 ## Status
 
 `src/musiccore.c` is a test core with this exact shape. It logs every callback as `ytmcore:` in the kernel log and plays a pulsed tone when the system starts it. Still unknown:
